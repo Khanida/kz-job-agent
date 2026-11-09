@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: adeena-job-agent
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: DATABASE_PATH
+        value: /var/data/jobs.db
+    disk:
+      name: job-agent-data
+      mountPath: /var/data
+      sizeGB: 1
