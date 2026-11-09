@@ -56,8 +56,8 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             response = self.client.get("/")
             self.assertEqual(response.status_code, 200)
             self.assertIn("The Jury's Daily Selection", response.text)
-            self.assertIn("No daily picks have been crowned yet", response.text)
-            self.assertIn("Refresh today’s top five", response.text)
+            self.assertIn("No jobs currently meet your Jury preferences", response.text)
+            self.assertIn("prioritizes Jeddah, Saudi Arabia", response.text)
         finally:
             with get_db() as c:
                 c.executemany(
@@ -216,7 +216,11 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         cases = [
             (
                 {"title": "Senior Back-end Developer", "description": "Experienced engineer"},
-                "senior or lead",
+                "senior, lead",
+            ),
+            (
+                {"title": "Tier III Service Desk Engineer", "description": "Technical support role."},
+                "advanced-tier",
             ),
             (
                 {"title": "Rust Software Engineer", "description": "Build production software in Rust and C++."},
@@ -247,7 +251,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         suitable = assess_candidate_constraints(
             {
                 "title": "Graduate Embedded Systems Engineer",
-                "description": "Entry-level role using Python and microcontrollers.",
+                "description": "Entry-level role using Python and microcontrollers; Pakistani applicants welcome.",
                 "location": "Jeddah, Saudi Arabia",
             },
             profile,
@@ -326,7 +330,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 "title": "Graduate Embedded Systems Engineer",
                 "company": "Jeddah Co",
                 "location": "Jeddah, Saudi Arabia",
-                "description": "Entry-level Python and microcontroller engineering role.",
+                "description": "Entry-level Python and microcontroller engineering role; Pakistani applicants welcome.",
                 "liveness_status": "live",
                 "authenticity_status": "likely_official",
             },
@@ -342,6 +346,90 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             if arg["type"] == "location_preference"
         )
         self.assertIn("prioritize", location_argument["statement"].lower())
+
+    def test_jeddah_job_requires_expat_eligibility_evidence(self):
+        profile = {
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+            "experience_level": "entry-level",
+            "excluded_skills": "Rust",
+            "excluded_job_terms": "backend, back-end, full-stack, full stack",
+        }
+        no_evidence = assess_candidate_constraints(
+            {
+                "title": "Junior QA Engineer",
+                "description": "Entry-level manual testing role.",
+                "location": "Jeddah, Saudi Arabia",
+            },
+            profile,
+        )
+        self.assertFalse(no_evidence["eligible"])
+        self.assertEqual(no_evidence["local_expat_status"], "unverified")
+        self.assertIn("Pakistani or other non-Saudi", no_evidence["local_expat_evidence"])
+
+        pakistani_expats = assess_candidate_constraints(
+            {
+                "title": "Junior QA Engineer",
+                "description": "Entry-level role. Pakistani applicants are welcome.",
+                "location": "Jeddah, Saudi Arabia",
+            },
+            profile,
+        )
+        self.assertTrue(pakistani_expats["eligible"])
+        self.assertEqual(pakistani_expats["local_expat_status"], "evidence_found")
+        self.assertIn("does not independently confirm", pakistani_expats["local_expat_evidence"])
+
+        transferable_iqama = assess_candidate_constraints(
+            {
+                "title": "Junior QA Engineer",
+                "description": "Entry-level role; candidates must have a transferable iqama.",
+                "location": "Jeddah, Saudi Arabia",
+            },
+            profile,
+        )
+        self.assertFalse(transferable_iqama["eligible"])
+        self.assertEqual(transferable_iqama["local_expat_status"], "general_signal")
+        self.assertIn("does not state that Pakistani applicants are eligible", transferable_iqama["local_expat_evidence"])
+
+        restricted = assess_candidate_constraints(
+            {
+                "title": "Junior QA Engineer",
+                "description": "Entry-level role for Saudi nationals only.",
+                "location": "Jeddah, Saudi Arabia",
+            },
+            profile,
+        )
+        self.assertFalse(restricted["eligible"])
+        self.assertEqual(restricted["local_expat_status"], "restricted")
+
+    def test_jury_debates_unverified_pakistani_eligibility_for_jeddah_job(self):
+        job = {
+            "id": "jeddah-expat-unverified",
+            "title": "Junior QA Engineer",
+            "company": "Jeddah Employer",
+            "location": "Jeddah, Saudi Arabia",
+            "description": "Entry-level quality testing role with structured training.",
+            "liveness_status": "live",
+            "authenticity_status": "likely_official",
+        }
+        profile = {
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+            "experience_level": "entry-level",
+            "excluded_skills": "Rust",
+            "excluded_job_terms": "backend, back-end, full-stack, full stack",
+        }
+
+        result = SupremeJuryAgent().run_full_session([job], profile)["jobs"][0]
+
+        self.assertEqual(result["is_daily_pick"], 0)
+        self.assertEqual(result["local_expat_status"], "unverified")
+        self.assertIn("LOCAL EXPAT ELIGIBILITY UNVERIFIED", result["verdict_status"])
+        expat_argument = next(
+            argument for argument in result["arguments"]
+            if argument["type"] == "local_expat_eligibility"
+        )
+        self.assertIn("Pakistani or other non-Saudi", expat_argument["statement"])
 
     def test_cv_match_influences_jury_ranking(self):
         profile = {
@@ -496,6 +584,8 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             "arguments": [],
             "preferred_city": "",
             "matches_preferred_city": False,
+            "local_expat_status": "not_applicable",
+            "local_expat_evidence": "",
         }
         with patch.object(
             SupremeJuryAgent, "deliberate_job", return_value=majority_approval

@@ -220,8 +220,11 @@ def assess_candidate_constraints(job: Dict[str, Any], profile: Dict[str, Any]) -
 
     experience_level = (profile.get("experience_level") or "entry-level").strip().lower()
     if experience_level == "entry-level":
-        if re.search(r"\b(?:senior|sr\.?|lead|principal|staff|head of)\b", title):
-            reasons.append("The title is senior or lead level, outside the candidate's entry-level preference.")
+        if re.search(
+            r"\b(?:senior|sr\.?|lead|principal|staff|head of|tier\s*(?:iii|3)|level\s*3|l3)\b",
+            title,
+        ):
+            reasons.append("The title is senior, lead, or advanced-tier, outside the candidate's entry-level preference.")
         years_required = re.search(
             r"\b(?:at least|minimum of|required|requires?|requiring)\s+"
             r"(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:professional\s+|relevant\s+|industry\s+)?experience\b",
@@ -296,9 +299,94 @@ def assess_candidate_constraints(job: Dict[str, Any], profile: Dict[str, Any]) -
         )
     )
 
+    local_expat_status = "not_applicable"
+    local_expat_evidence = ""
+    if (
+        matches_preferred_city
+        and "saudi" in residence.lower()
+        and "saudi" not in citizenship
+    ):
+        eligibility_text = f"{title} {description}"
+        restriction_patterns = (
+            r"\bsaudi nationals? only\b",
+            r"\bonly saudi nationals?\b",
+            r"\bsaudi citizens? only\b",
+            r"\bonly saudi citizens?\b",
+            r"\bmust be (?:a )?saudi (?:national|citizen)\b",
+            r"\bsaudi nationality required\b",
+            r"\breserved for saudi (?:nationals?|citizens?)\b",
+            r"\bnon[- ]saudis? (?:are )?not (?:eligible|accepted|considered)\b",
+            r"\b(?:expats?|expatriates?|foreign nationals?) (?:are )?not (?:eligible|accepted|considered)\b",
+            r"\b(?:no|without) (?:work )?visa sponsorship\b",
+            r"\bvisa sponsorship (?:is )?(?:not available|not provided|unavailable)\b",
+            r"\btransferable iqama (?:is )?not accepted\b",
+        )
+        positive_eligibility_patterns = (
+            r"\bpakistani (?:nationals?|applicants?|candidates?) (?:are )?(?:welcome|eligible|accepted)\b",
+            r"\b(?:welcome|open) to pakistani (?:nationals?|applicants?|candidates?)\b",
+            r"\b(?:expats?|expatriates?) (?:are )?(?:welcome|eligible|accepted)\b",
+            r"\b(?:welcome|open) to (?:expats?|expatriates?)\b",
+            r"\bnon[- ]saudi (?:nationals?|applicants?|candidates?) (?:are )?(?:welcome|eligible|accepted)\b",
+            r"\bforeign nationals? (?:are )?(?:welcome|eligible|accepted)\b",
+            r"\ball nationalities (?:are )?(?:welcome|eligible|accepted)\b",
+        )
+        if any(re.search(pattern, eligibility_text) for pattern in restriction_patterns):
+            local_expat_status = "restricted"
+            local_expat_evidence = (
+                "The local posting states that eligibility is restricted to Saudi nationals or excludes non-Saudis."
+            )
+            reasons.append(local_expat_evidence)
+        else:
+            matched_evidence = next(
+                (
+                    match.group(0)
+                    for pattern in positive_eligibility_patterns
+                    if (match := re.search(pattern, eligibility_text))
+                ),
+                None,
+            )
+            if matched_evidence:
+                local_expat_status = "evidence_found"
+                local_expat_evidence = (
+                    f"The posting says “{matched_evidence},” supporting eligibility for Pakistani applicants. "
+                    "This does not independently confirm the employer's past hiring history."
+                )
+            else:
+                local_expat_status = "unverified"
+                general_signal_patterns = (
+                    r"\btransferable iqama\b",
+                    r"\biqama transfer\b",
+                    r"\bvisa sponsorship\b",
+                    r"\bwork visa (?:sponsorship|provided|available)\b",
+                    r"\bsponsorship available\b",
+                )
+                general_signal = next(
+                    (
+                        match.group(0)
+                        for pattern in general_signal_patterns
+                        if (match := re.search(pattern, eligibility_text))
+                    ),
+                    None,
+                )
+                if general_signal:
+                    local_expat_status = "general_signal"
+                    local_expat_evidence = (
+                        f"The posting mentions “{general_signal},” but does not state that Pakistani applicants are eligible. "
+                        "Confirm directly with the employer before treating it as suitable."
+                    )
+                else:
+                    local_expat_evidence = (
+                        f"This posting is in {preferred_city}, but it does not say whether Pakistani or other non-Saudi "
+                        "applicants are eligible. Confirm directly with the employer before treating it as suitable."
+                    )
+            if local_expat_status in ("unverified", "general_signal"):
+                reasons.append(local_expat_evidence)
+
     return {
         "eligible": not reasons,
         "reasons": list(dict.fromkeys(reasons)),
         "preferred_city": preferred_city,
         "matches_preferred_city": matches_preferred_city,
+        "local_expat_status": local_expat_status,
+        "local_expat_evidence": local_expat_evidence,
     }

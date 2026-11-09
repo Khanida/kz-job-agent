@@ -172,6 +172,31 @@ class SupremeJuryAgent:
             "statement": location_statement,
             "score": 100 if preference_check["matches_preferred_city"] else 50,
         })
+        if preference_check["local_expat_status"] == "evidence_found":
+            expat_statement = preference_check["local_expat_evidence"]
+            expat_score = 80
+        elif preference_check["local_expat_status"] == "restricted":
+            expat_statement = "OBJECTION: " + preference_check["local_expat_evidence"]
+            expat_score = 0
+        elif preference_check["local_expat_status"] == "general_signal":
+            expat_statement = "OBJECTION: " + preference_check["local_expat_evidence"]
+            expat_score = 20
+        elif preference_check["local_expat_status"] == "unverified":
+            expat_statement = "OBJECTION: " + preference_check["local_expat_evidence"]
+            expat_score = 0
+        else:
+            expat_statement = (
+                "Not a posting in the candidate's preferred city; local Pakistani-expat eligibility check does not apply."
+            )
+            expat_score = 50
+        arguments.append({
+            "agent_name": "Local Expat Eligibility Examiner",
+            "agent_role": "Pakistani Applicant & Saudi Work-Authorization Review",
+            "avatar": "🛂",
+            "type": "local_expat_eligibility",
+            "statement": expat_statement,
+            "score": expat_score,
+        })
 
         # Step 3: Learned Preferences Agent Feedback
         if learned_reasons:
@@ -236,6 +261,14 @@ class SupremeJuryAgent:
             verdict_status = "REJECTED BY JURY (SUSPICIOUS POSTING LINK)"
             summary = "The Jury found a clear security red flag in the posting destination."
             recommendation = "Do not apply through this link or enter personal information. Find the role through the employer's official careers page."
+        elif preference_check["local_expat_status"] == "restricted":
+            verdict_status = "REJECTED BY JURY (NON-SAUDI APPLICANTS RESTRICTED)"
+            summary = preference_check["local_expat_evidence"]
+            recommendation = "Do not prioritize this local role because the posting excludes non-Saudi applicants."
+        elif preference_check["local_expat_status"] in ("unverified", "general_signal"):
+            verdict_status = "DEFERRED BY JURY (LOCAL EXPAT ELIGIBILITY UNVERIFIED)"
+            summary = preference_check["local_expat_evidence"]
+            recommendation = "Contact the employer to confirm that Pakistani applicants are eligible before applying."
         elif not preference_check["eligible"]:
             verdict_status = "REJECTED BY JURY (CANDIDATE EXPERIENCE MISMATCH)"
             summary = "The posting conflicts with the candidate's stated experience level, skill exclusions, or preferred role types."
@@ -296,6 +329,8 @@ class SupremeJuryAgent:
             "arguments": arguments,
             "preferred_city": preference_check["preferred_city"],
             "matches_preferred_city": preference_check["matches_preferred_city"],
+            "local_expat_status": preference_check["local_expat_status"],
+            "local_expat_evidence": preference_check["local_expat_evidence"],
             "is_selected": (
                 consensus_score >= 65
                 and not has_blocker
@@ -327,6 +362,8 @@ class SupremeJuryAgent:
             job_copy["arguments"] = delib["arguments"]
             job_copy["preferred_city"] = delib["preferred_city"]
             job_copy["matches_preferred_city"] = delib["matches_preferred_city"]
+            job_copy["local_expat_status"] = delib["local_expat_status"]
+            job_copy["local_expat_evidence"] = delib["local_expat_evidence"]
             job_copy["is_daily_pick"] = 0
             deliberated_jobs.append(job_copy)
 

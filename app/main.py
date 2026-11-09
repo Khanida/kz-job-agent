@@ -525,7 +525,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         </section>
         """
     else:
-        daily_shelf_html = """
+        daily_shelf_html = f"""
         <section class='daily-section'>
           <div class='daily-header'>
             <div>
@@ -535,8 +535,8 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
           </div>
           <div class='empty-state'>
-            <h3>No daily picks have been crowned yet</h3>
-            <p>Refresh today’s top five to have the Jury recheck live postings and rank eligible majority-approved jobs.</p>
+            <h3>No jobs currently meet your Jury preferences</h3>
+            <p>The Jury excludes senior and advanced-tier roles, Rust and backend-focused jobs, unavailable listings, and roles restricted to Saudi nationals. It prioritizes {esc(p['residence'] or 'your preferred city')} when a qualified live role is available; broaden your preferences in your <a href='/profile'>profile</a> or refresh after new postings arrive.</p>
           </div>
         </section>
         """
@@ -829,6 +829,8 @@ def jury_room(msg: str = ""):
                 statement = esc(arg["statement"])
                 
                 avatar = (
+                    "🛂" if "Local Expat Eligibility" in agent_name else
+                    "📍" if "City Preference" in agent_name else
                     "🛡️" if "Authenticity" in agent_name else
                     "🔎" if "Availability" in agent_name else
                     ("📄" if "CV & Target Role" in agent_name else
@@ -1090,7 +1092,7 @@ def profile_page(msg: str = ""):
       </label>
       <div class='cv-analysis-group'>
         <strong>Job fit preferences used by the Jury</strong>
-        <small class='muted'>Your current city, from Current Residence, is prioritized first. These are hard filters for daily picks; Saudi-national-only postings are excluded when your saved citizenship is not Saudi.</small>
+        <small class='muted'>Your current city is prioritized first. For Jeddah jobs, the Jury requires posting evidence that Pakistani applicants are eligible (for example, “Pakistani applicants welcome”); generic visa or iqama language is not enough. This does not prove past hiring history.</small>
       </div>
       <label>Experience level
         <select name='experience_level'>
