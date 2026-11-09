@@ -6,7 +6,11 @@ import httpx
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app, extract_text_from_file, get_db, esc
-from app.agents.cv_analyzer import analyze_cv, score_cv_match
+from app.agents.cv_analyzer import (
+    analyze_cv,
+    assess_candidate_constraints,
+    score_cv_match,
+)
 from app.agents.workers import BaseWorker, CuratedEmployerScout
 from app.agents.orchestrator import run_jury_deliberation_workflow
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
@@ -33,8 +37,43 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("Refresh Today’s Top 5", response.text)
         self.assertIn("data-agent-flow", response.text)
         self.assertIn("Workers scout", response.text)
-        self.assertIn("Agents debate", response.text)
+        self.assertIn("Sub-Agents debate", response.text)
         self.assertIn("Jury decides", response.text)
+        self.assertIn("flow-delivery", response.text)
+        self.assertIn("Found new jobs!", response.text)
+        self.assertIn("Check the link!", response.text)
+
+    def test_dashboard_explains_when_there_are_no_daily_picks(self):
+        with get_db() as c:
+            previous_picks = [
+                row["id"] for row in c.execute(
+                    "SELECT id FROM jobs WHERE is_daily_pick=1"
+                ).fetchall()
+            ]
+            c.execute("UPDATE jobs SET is_daily_pick=0")
+
+        try:
+            response = self.client.get("/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("The Jury's Daily Selection", response.text)
+            self.assertIn("No daily picks have been crowned yet", response.text)
+            self.assertIn("Refresh today’s top five", response.text)
+        finally:
+            with get_db() as c:
+                c.executemany(
+                    "UPDATE jobs SET is_daily_pick=1 WHERE id=?",
+                    [(job_id,) for job_id in previous_picks],
+                )
+
+    def test_project_uses_shared_pink_blue_peach_palette(self):
+        response = self.client.get("/static/style.css")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("--bg: #fff9fb", response.text)
+        self.assertIn("--primary: #790a3d", response.text)
+        self.assertIn("--accent: #5366ec", response.text)
+        self.assertIn("--blue-border: #9acafa", response.text)
+        self.assertIn("--gold-border: #ffd09b", response.text)
 
     def test_daily_refresh_button_runs_jury_workflow(self):
         with patch("app.main.run_jury_deliberation_workflow", new_callable=AsyncMock) as workflow:
@@ -166,6 +205,144 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             analyze_cv("Python developer with backend API experience.")["roles"],
         )
 
+    def test_candidate_preferences_reject_senior_rust_and_backend_roles(self):
+        profile = {
+            "experience_level": "entry-level",
+            "excluded_skills": "Rust",
+            "excluded_job_terms": "backend, back-end, full-stack, full stack",
+            "residence": "Jeddah, Saudi Arabia",
+            "citizenship": "Pakistani",
+        }
+        cases = [
+            (
+                {"title": "Senior Back-end Developer", "description": "Experienced engineer"},
+                "senior or lead",
+            ),
+            (
+                {"title": "Rust Software Engineer", "description": "Build production software in Rust and C++."},
+                "Rust",
+            ),
+            (
+                {"title": "Junior Backend Developer", "description": "Entry-level role with mentorship."},
+                "backend",
+            ),
+            (
+                {"title": "Full-Stack Graduate Developer", "description": "Graduate role."},
+                "full-stack",
+            ),
+            (
+                {
+                    "title": "Graduate Software Engineer",
+                    "description": "This role is open to Saudi nationals only.",
+                },
+                "restricted to Saudi nationals",
+            ),
+        ]
+        for job, reason in cases:
+            with self.subTest(job=job["title"]):
+                result = assess_candidate_constraints(job, profile)
+                self.assertFalse(result["eligible"])
+                self.assertTrue(any(reason in item for item in result["reasons"]))
+
+        suitable = assess_candidate_constraints(
+            {
+                "title": "Graduate Embedded Systems Engineer",
+                "description": "Entry-level role using Python and microcontrollers.",
+                "location": "Jeddah, Saudi Arabia",
+            },
+            profile,
+        )
+        self.assertTrue(suitable["eligible"])
+        self.assertEqual(suitable["preferred_city"], "Jeddah")
+        self.assertTrue(suitable["matches_preferred_city"])
+
+    def test_jury_rejects_jobs_outside_explicit_candidate_preferences(self):
+        profile = {
+            "skills": "Python, Embedded Systems",
+            "target_roles": "Junior Embedded Systems Engineer",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+            "experience_level": "entry-level",
+            "excluded_skills": "Rust",
+            "excluded_job_terms": "backend, back-end, full-stack, full stack",
+        }
+        jobs = [
+            {
+                "id": "senior-rust-backend",
+                "title": "Senior Rust Backend Engineer",
+                "company": "Example Co",
+                "location": "Remote",
+                "description": "Requires at least 5 years of experience building backend services in Rust.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+            {
+                "id": "entry-embedded",
+                "title": "Graduate Embedded Systems Engineer",
+                "company": "Embedded Co",
+                "location": "Remote",
+                "description": "Entry-level role using Python and microcontrollers.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+        ]
+
+        results = {
+            job["id"]: job
+            for job in SupremeJuryAgent().run_full_session(jobs, profile)["jobs"]
+        }
+
+        rejected = results["senior-rust-backend"]
+        self.assertEqual(rejected["jury_score"], 0)
+        self.assertEqual(rejected["is_daily_pick"], 0)
+        self.assertIn("CANDIDATE EXPERIENCE MISMATCH", rejected["verdict_status"])
+        constraint_argument = next(
+            arg for arg in rejected["arguments"]
+            if arg["type"] == "candidate_constraints"
+        )
+        self.assertIn("Rust", constraint_argument["statement"])
+        self.assertIn("entry-level", constraint_argument["statement"])
+        self.assertEqual(results["entry-embedded"]["is_daily_pick"], 1)
+
+    def test_jury_prioritizes_preferred_city_over_higher_scoring_fallback(self):
+        profile = {
+            "skills": "Python, Embedded Systems",
+            "target_roles": "Junior Embedded Systems Engineer",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+        }
+        jobs = [
+            {
+                "id": "fallback-city",
+                "title": "Graduate Embedded Systems Engineer",
+                "company": "Fallback Co",
+                "location": "Remote",
+                "description": "Entry-level Python and microcontroller engineering role.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+            {
+                "id": "preferred-city",
+                "title": "Graduate Embedded Systems Engineer",
+                "company": "Jeddah Co",
+                "location": "Jeddah, Saudi Arabia",
+                "description": "Entry-level Python and microcontroller engineering role.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+        ]
+
+        result = SupremeJuryAgent().run_full_session(jobs, profile)
+
+        self.assertEqual(result["jobs"][0]["id"], "preferred-city")
+        self.assertTrue(result["jobs"][0]["matches_preferred_city"])
+        self.assertEqual(result["jobs"][0]["is_daily_pick"], 1)
+        location_argument = next(
+            arg for arg in result["jobs"][0]["arguments"]
+            if arg["type"] == "location_preference"
+        )
+        self.assertIn("prioritize", location_argument["statement"].lower())
+
     def test_cv_match_influences_jury_ranking(self):
         profile = {
             "skills": "Flutter, Dart, Android, Firebase",
@@ -251,13 +428,16 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 c.execute(
                     """UPDATE profile
                        SET name=?, citizenship=?, residence=?, degree=?, skills=?, target_roles=?,
-                           cv_text=?, cv_analysis=?, updated_at=?
+                           cv_text=?, cv_analysis=?, experience_level=?, excluded_skills=?,
+                           excluded_job_terms=?, updated_at=?
                        WHERE id=1""",
                     (
                         previous_profile["name"], previous_profile["citizenship"],
                         previous_profile["residence"], previous_profile["degree"],
                         previous_profile["skills"], previous_profile["target_roles"],
                         previous_profile["cv_text"], previous_profile.get("cv_analysis"),
+                        previous_profile["experience_level"], previous_profile["excluded_skills"],
+                        previous_profile["excluded_job_terms"],
                         previous_profile["updated_at"],
                     ),
                 )
@@ -303,6 +483,37 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertEqual(blocked_job["id"], "job_b")
         self.assertEqual(blocked_job["is_daily_pick"], 0)
         self.assertIn("REJECTED", blocked_job["verdict_status"])
+
+    def test_majority_approved_live_job_is_crowned_as_daily_pick(self):
+        majority_approval = {
+            "consensus_score": 55,
+            "verdict_status": "APPROVED BY MAJORITY VOTE",
+            "summary": "Majority-approved candidate.",
+            "recommendation": "Review the posting and apply.",
+            "advocate_agent": "Test Advocate",
+            "visa_evidence": "Not verified",
+            "housing_evidence": "Not verified",
+            "arguments": [],
+            "preferred_city": "",
+            "matches_preferred_city": False,
+        }
+        with patch.object(
+            SupremeJuryAgent, "deliberate_job", return_value=majority_approval
+        ):
+            session = SupremeJuryAgent().run_full_session(
+                [{
+                    "id": "majority-live-job",
+                    "title": "Junior Software Engineer",
+                    "company": "Example Co",
+                    "location": "Remote",
+                    "liveness_status": "live",
+                    "authenticity_status": "unverified",
+                }],
+                {},
+            )
+
+        self.assertEqual(session["crowned_count"], 1)
+        self.assertEqual(session["jobs"][0]["is_daily_pick"], 1)
 
     def test_worker_scout(self):
         scout = CuratedEmployerScout()

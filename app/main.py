@@ -58,7 +58,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS profile (
           id INTEGER PRIMARY KEY CHECK(id=1), name TEXT, citizenship TEXT,
           residence TEXT, degree TEXT, skills TEXT, target_roles TEXT,
-          cv_text TEXT, cv_filename TEXT, cv_uploaded_at TEXT, cv_analysis TEXT, updated_at TEXT
+          cv_text TEXT, cv_filename TEXT, cv_uploaded_at TEXT, cv_analysis TEXT,
+          experience_level TEXT DEFAULT 'entry-level',
+          excluded_skills TEXT DEFAULT 'Rust',
+          excluded_job_terms TEXT DEFAULT 'backend, back-end, full-stack, full stack',
+          updated_at TEXT
         );
         CREATE TABLE IF NOT EXISTS applications (
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, status TEXT,
@@ -98,7 +102,10 @@ def init_db():
         for col, col_def in [
             ("cv_filename", "TEXT"),
             ("cv_uploaded_at", "TEXT"),
-            ("cv_analysis", "TEXT")
+            ("cv_analysis", "TEXT"),
+            ("experience_level", "TEXT DEFAULT 'entry-level'"),
+            ("excluded_skills", "TEXT DEFAULT 'Rust'"),
+            ("excluded_job_terms", "TEXT DEFAULT 'backend, back-end, full-stack, full stack'")
         ]:
             try:
                 c.execute(f"ALTER TABLE profile ADD COLUMN {col} {col_def}")
@@ -334,10 +341,9 @@ def layout(body, active_nav="dashboard"):
       const stages = [...flow.querySelectorAll("[data-flow-stage]")];
       const status = flow.querySelector("[data-flow-status]");
       const updates = [
-        "Workers are collecting fresh job files…",
-        "Worker dossiers are being submitted to the Sub-Agents…",
-        "Sub-Agents are debating fit, quality, and relocation…",
-        "The Jury is weighing the arguments and ranking today’s top five…"
+        "Workers are gathering job files and carrying them to the Sub-Agents…",
+        "Sub-Agents are debating each job before passing finalists to the Jury…",
+        "The Jury is hearing the arguments and choosing today’s top five…"
       ];
       let activeStage = 0;
 
@@ -351,7 +357,7 @@ def layout(body, active_nav="dashboard"):
       }};
 
       advance();
-      window.setInterval(advance, 2400);
+      window.setInterval(advance, 3200);
     }})();
   </script>
 </body>
@@ -415,7 +421,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
     
     pref_chips = []
     for kw in top_kws[:4]:
-        pref_chips.append(f"<span class='pill' style='background:#f3eaff; color:#6225b5; font-size:11px;'>★ {esc(kw['feature_value'])} (+{kw['score_delta']})</span>")
+        pref_chips.append(f"<span class='pill' style='background:#f1f4ff; color:#4057d4; font-size:11px;'>★ {esc(kw['feature_value'])} (+{kw['score_delta']})</span>")
     for loc in top_locs[:3]:
         pref_chips.append(f"<span class='pill' style='background:#fdf2e9; color:#9c4700; font-size:11px;'>📍 {esc(loc['feature_value'].capitalize())} (+{loc['score_delta']})</span>")
     
@@ -425,13 +431,13 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
     <section class='training-banner'>
       <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;'>
         <div style='display:flex; align-items:center; gap:14px;'>
-          <div style='font-size:28px; background:#f2eafd; border-radius:12px; width:48px; height:48px; display:flex; align-items:center; justify-content:center;'>🧠</div>
+          <div style='font-size:28px; background:#e9f3ff; border-radius:12px; width:48px; height:48px; display:flex; align-items:center; justify-content:center;'>🧠</div>
           <div>
             <div style='display:flex; align-items:center; gap:8px;'>
-              <span class='pill' style='background:#f3eaff; color:#6225b5; font-weight:800; font-size:11px;'>LEARNED REINFORCEMENT</span>
-              <strong style='font-size:14px; color:#2d1b4e;'>Model Training: {esc(training_info['stage'])}</strong>
+              <span class='pill' style='background:#f1f4ff; color:#4057d4; font-weight:800; font-size:11px;'>LEARNED REINFORCEMENT</span>
+              <strong style='font-size:14px; color:#3e1026;'>Model Training: {esc(training_info['stage'])}</strong>
             </div>
-            <p style='margin:3px 0 0; color:#584a6b; font-size:13px;'>{esc(training_info['stage_desc'])}</p>
+            <p style='margin:3px 0 0; color:#735d69; font-size:13px;'>{esc(training_info['stage_desc'])}</p>
           </div>
         </div>
         <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap;'>
@@ -443,8 +449,8 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
           </form>
         </div>
       </div>
-      <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px; padding-top:12px; border-top:1px solid #ebdcfc; font-size:12px;'>
-        <b style='color:#3a2063;'>Top Learned Preferences:</b>
+      <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px; padding-top:12px; border-top:1px solid #cbd2ff; font-size:12px;'>
+        <b style='color:#4057d4;'>Top Learned Preferences:</b>
         {pref_chips_html}
       </div>
     </section>
@@ -481,11 +487,11 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               <div style='margin-top:10px;'>
                 <div class='job-header'>
                   <span class='verdict-tag'>{dp_verdict}</span>
-                  <span class='score-badge' style='background:#fcf1d8; color:#966100;'>{dp_score}/100 Jury Score</span>
+                  <span class='score-badge' style='background:#fff0df; color:#790a3d;'>{dp_score}/100 Jury Score</span>
                 </div>
                 <h3 style='margin:8px 0 4px;'>{dp_title}</h3>
                 <p class='company-loc'>{dp_company} · {dp_location}</p>
-                <div style='font-size:12px; color:#5a6857; margin-bottom:14px;'>
+                <div style='font-size:12px; color:#735d69; margin-bottom:14px;'>
                   <b>Advocate:</b> {dp_advocate}<br>
                   <b>Posting check:</b> {liveness_badge(dp_liveness)}<br>
                   <b>Employer link check:</b> {authenticity_badge(dp_authenticity)}<br>
@@ -495,7 +501,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               <div class='job-footer'>
                 <div class='daily-card-links'>
                   {posting_link(dp_id, dp_liveness)}
-                  <a href='/jury#{dp_id}' style='font-size:12px; color:#966100; font-weight:700;'>Read Debate & Verdict →</a>
+                  <a href='/jury#{dp_id}' style='font-size:12px; color:#790a3d; font-weight:700;'>Read Debate & Verdict →</a>
                 </div>
                 <div class='job-actions'>
                   {action_btn}
@@ -508,13 +514,29 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         <section class='daily-section'>
           <div class='daily-header'>
             <div>
-              <p class='eyebrow' style='color:#966100;'>SUPREME JURY DECREE</p>
+              <p class='eyebrow' style='color:#790a3d;'>SUPREME JURY DECREE</p>
               <h2 style='margin:4px 0 0;'>The Jury's Daily Selection</h2>
             </div>
-            <a href='/jury' style='font-size:13px; font-weight:700; color:#966100;'>Open Jury Deliberation Room →</a>
+            <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
           </div>
           <div class='daily-grid'>
             {"".join(pick_cards)}
+          </div>
+        </section>
+        """
+    else:
+        daily_shelf_html = """
+        <section class='daily-section'>
+          <div class='daily-header'>
+            <div>
+              <p class='eyebrow' style='color:#790a3d;'>SUPREME JURY DECREE</p>
+              <h2 style='margin:4px 0 0;'>The Jury's Daily Selection</h2>
+            </div>
+            <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
+          </div>
+          <div class='empty-state'>
+            <h3>No daily picks have been crowned yet</h3>
+            <p>Refresh today’s top five to have the Jury recheck live postings and rank eligible majority-approved jobs.</p>
           </div>
         </section>
         """
@@ -586,9 +608,9 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               </form>
             """
 
-        advocate_badge = f"<span class='pill' style='background:#f4f3ec;'>{j_advocate}</span>" if j_advocate else ""
+        advocate_badge = f"<span class='pill' style='background:#f6e8ee;'>{j_advocate}</span>" if j_advocate else ""
         boost, reasons = job_boosts.get(j["id"], (0, []))
-        learned_pill = f"<span class='pill' style='background:#f6efff; color:#6832b8; font-weight:750;'>🧠 {'+' if boost > 0 else ''}{boost} Learned Fit</span>" if boost != 0 else ""
+        learned_pill = f"<span class='pill' style='background:#e9f3ff; color:#4057d4; font-weight:750;'>🧠 {'+' if boost > 0 else ''}{boost} Learned Fit</span>" if boost != 0 else ""
 
         cards.append(f"""
         <article class='{job_card_class}'>
@@ -657,36 +679,42 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
       <div class='flow-heading'>
         <div>
           <p class='eyebrow'>TODAY’S SELECTION, IN MOTION</p>
-          <h2>From job files to the Jury’s top five</h2>
+          <h2>Daily Selection: From job files to the Jury’s top five</h2>
         </div>
         <span class='flow-live'><span></span> DAILY REVIEW</span>
       </div>
       <div class='flow-stages'>
-        <div class='flow-stage is-active' data-flow-stage='0'>
-          <span class='flow-icon' aria-hidden='true'>🧑‍💼</span>
+        <span class='flow-delivery' aria-hidden='true'>📄</span>
+        <div class='flow-stage flow-scene-stage is-active' data-flow-stage='0'>
+          <div class='flow-cartoon flow-worker-cartoon' aria-hidden='true'>
+            <span class='flow-character'>🧑‍💼</span>
+            <span class='flow-character'>👩‍💼</span>
+            <span class='flow-cartoon-files'><i>▤</i><i>▤</i><i>▤</i></span>
+            <span class='flow-speech'>Found new jobs!</span>
+          </div>
           <strong>Workers scout</strong>
-          <small>Collect fresh job files</small>
-          <span class='flow-files' aria-hidden='true'><i>▤</i><i>▤</i><i>▤</i></span>
+          <small>Collect files from job sites</small>
         </div>
         <span class='flow-arrow' aria-hidden='true'>→</span>
-        <div class='flow-stage' data-flow-stage='1'>
-          <span class='flow-icon' aria-hidden='true'>📂</span>
-          <strong>Submit dossiers</strong>
-          <small>Send files to Sub-Agents</small>
-          <span class='flow-files' aria-hidden='true'><i>▤</i><i>▤</i><i>▤</i></span>
+        <div class='flow-stage flow-scene-stage' data-flow-stage='1'>
+          <div class='flow-cartoon flow-agent-cartoon' aria-hidden='true'>
+            <span class='flow-character'>💻</span>
+            <span class='flow-character'>🎯</span>
+            <span class='flow-character'>🌍</span>
+            <span class='flow-speech'>“Strong fit!”<br>“Check the link!”</span>
+          </div>
+          <strong>Sub-Agents debate</strong>
+          <small>Challenge, check, and pass finalists on</small>
         </div>
         <span class='flow-arrow' aria-hidden='true'>→</span>
-        <div class='flow-stage' data-flow-stage='2'>
-          <span class='flow-icon' aria-hidden='true'>💻 🎯 🌍</span>
-          <strong>Agents debate</strong>
-          <small>Challenge each other’s picks</small>
-          <span class='flow-debate' aria-hidden='true'>“Strong fit!” · “What about visa?”</span>
-        </div>
-        <span class='flow-arrow' aria-hidden='true'>→</span>
-        <div class='flow-stage flow-jury' data-flow-stage='3'>
-          <span class='flow-icon' aria-hidden='true'>⚖️</span>
+        <div class='flow-stage flow-scene-stage flow-jury' data-flow-stage='2'>
+          <div class='flow-cartoon flow-jury-cartoon' aria-hidden='true'>
+            <span class='flow-character'>👩‍⚖️</span>
+            <span class='flow-jury-scales'>⚖️</span>
+            <span class='flow-speech'>The top five!</span>
+          </div>
           <strong>Jury decides</strong>
-          <small>Rank today’s top five</small>
+          <small>Choose the best jobs to apply for today</small>
           <span class='flow-top-five' aria-label='Five daily selections'>01&nbsp; 02&nbsp; 03&nbsp; 04&nbsp; 05</span>
         </div>
       </div>
@@ -825,7 +853,7 @@ def jury_room(msg: str = ""):
             <p class='muted' style='margin:6px 0;'>Sub-Agents evaluated profile alignment and verified absence of immediate immigration blockers.</p>
             """)
 
-        crown_badge = "<span class='verdict-tag' style='background:#fff5db; color:#966100; border-color:#e4bc6e;'>👑 Daily Selection</span>" if j_daily else ""
+        crown_badge = "<span class='verdict-tag' style='background:#fff0df; color:#790a3d; border-color:#ffd09b;'>👑 Daily Selection</span>" if j_daily else ""
         
         action_btn = (
             f"<span class='pill pill-amber'>★ Shortlisted</span>" if j_status == "shortlisted" else
@@ -844,18 +872,18 @@ def jury_room(msg: str = ""):
                 {crown_badge}
                 {liveness_badge(j_liveness)}
                 {authenticity_badge(j_authenticity)}
-                <span class='pill' style='background:#f3f1e9;'>Advocate: {j_advocate}</span>
+                <span class='pill' style='background:#e9f3ff;'>Advocate: {j_advocate}</span>
               </div>
               <h3 style='margin:0 0 4px; font-size:18px;'>{j_title}</h3>
               <p class='company-loc' style='margin:0;'>{j_company} · {j_location}</p>
             </div>
             <div style='text-align:right;'>
-              <span class='score-badge' style='font-size:14px; padding:6px 14px; background:#e8efe7; color:#214227;'>{j_score}/100 Consensus</span>
+              <span class='score-badge' style='font-size:14px; padding:6px 14px; background:#e7f2ff; color:#354dba;'>{j_score}/100 Consensus</span>
             </div>
           </div>
 
           <div class='debate-feed'>
-            <div style='font-weight:750; font-size:12px; color:#596555; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px;'>
+            <div style='font-weight:750; font-size:12px; color:#735d69; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px;'>
               Court Debate & Cross-Examination
             </div>
             {"".join(debate_speeches)}
@@ -864,7 +892,7 @@ def jury_room(msg: str = ""):
           <div class='verdict-box'>
             <div class='verdict-header'>
               <span>⚖️ SUPREME JURY VERDICT:</span>
-              <span style='text-transform:uppercase; color:#966100;'>{j_verdict}</span>
+              <span style='text-transform:uppercase; color:#790a3d;'>{j_verdict}</span>
             </div>
             <p class='verdict-summary'>{esc((j['description'] or '')[:280])}...</p>
             <p class='verdict-action'><b>Recommendation for Candidate:</b> {j_rec}</p>
@@ -929,11 +957,11 @@ def jury_room(msg: str = ""):
         <p class='agent-desc'>Vets international sponsorship, EU Blue Card, UK Skilled Worker, and relocation allowances. Vetoes roles that exclude non-residents.</p>
       </div>
 
-      <div class='agent-card' style='border-color:var(--gold-border); background:#fffcf6;'>
+      <div class='agent-card' style='border-color:var(--gold-border); background:#fff8ef;'>
         <div class='agent-card-header'>
-          <div class='agent-avatar' style='background:#f6ebd3;'>⚖️</div>
+          <div class='agent-avatar' style='background:#ffd09b;'>⚖️</div>
           <div>
-            <div class='agent-name' style='color:#966100;'>Supreme Jury Agent</div>
+            <div class='agent-name' style='color:#790a3d;'>Supreme Jury Agent</div>
             <div class='agent-role'>Chief Career Arbiter</div>
           </div>
         </div>
@@ -942,12 +970,12 @@ def jury_room(msg: str = ""):
     </div>
 
     <!-- Active Session Banner -->
-    <div class='panel' style='background:#fbfbf9; border-left:4px solid #966100;'>
+    <div class='panel' style='background:#fff9fb; border-left:4px solid #790a3d;'>
       <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>
         <div>
-          <span class='pill' style='background:#eedfae; color:#784f00; font-weight:800;'>SESSION {session_id}</span>
+          <span class='pill' style='background:#fff0df; color:#790a3d; font-weight:800;'>SESSION {session_id}</span>
           <h3 style='margin:8px 0 4px;'>Latest Court Deliberation Summary</h3>
-          <p style='color:#464f43; margin:0; font-size:14px;'>{delib_summary}</p>
+          <p style='color:#59414c; margin:0; font-size:14px;'>{delib_summary}</p>
         </div>
       </div>
     </div>
@@ -1060,6 +1088,22 @@ def profile_page(msg: str = ""):
         <small class='muted'>Automatically suggested when CV text changes; you can edit these.</small>
         <textarea name='target_roles' rows='3'>{esc(p['target_roles'])}</textarea>
       </label>
+      <div class='cv-analysis-group'>
+        <strong>Job fit preferences used by the Jury</strong>
+        <small class='muted'>Your current city, from Current Residence, is prioritized first. These are hard filters for daily picks; Saudi-national-only postings are excluded when your saved citizenship is not Saudi.</small>
+      </div>
+      <label>Experience level
+        <select name='experience_level'>
+          <option value='entry-level' {'selected' if (p['experience_level'] or 'entry-level') == 'entry-level' else ''}>Entry-level only</option>
+          <option value='any' {'selected' if (p['experience_level'] or 'entry-level') == 'any' else ''}>Any level</option>
+        </select>
+      </label>
+      <label>Skills to exclude from recommendations (comma-separated)
+        <input name='excluded_skills' value='{esc(p['excluded_skills'] or 'Rust')}' placeholder='e.g. Rust'>
+      </label>
+      <label>Role types to avoid (comma-separated)
+        <input name='excluded_job_terms' value='{esc(p['excluded_job_terms'] or 'backend, back-end, full-stack, full stack')}' placeholder='e.g. backend, full-stack'>
+      </label>
       <label>CV / Resume Summary Text
         <textarea name='cv_text' rows='10' placeholder='Paste your CV text or experience summary here, or upload your PDF/file above...'>{esc(p['cv_text'])}</textarea>
       </label>
@@ -1078,6 +1122,9 @@ async def save_profile(
     degree: str = Form(""),
     skills: str = Form(""),
     target_roles: str = Form(""),
+    experience_level: str = Form("entry-level"),
+    excluded_skills: str = Form("Rust"),
+    excluded_job_terms: str = Form("backend, back-end, full-stack, full stack"),
     cv_text: str = Form(""),
     cv_file: Optional[UploadFile] = File(None)
 ):
@@ -1118,20 +1165,24 @@ async def save_profile(
         if uploaded_filename:
             c.execute(
                 """UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
-                   target_roles=?, cv_text=?, cv_filename=?, cv_uploaded_at=?, cv_analysis=?, updated_at=?
+                   target_roles=?, cv_text=?, cv_filename=?, cv_uploaded_at=?, cv_analysis=?,
+                   experience_level=?, excluded_skills=?, excluded_job_terms=?, updated_at=?
                    WHERE id=1""",
                 (
                     name, citizenship, residence, degree, skills, target_roles, cv_text,
-                    uploaded_filename, now_iso, cv_analysis_json, now_iso,
+                    uploaded_filename, now_iso, cv_analysis_json, experience_level,
+                    excluded_skills, excluded_job_terms, now_iso,
                 ),
             )
         else:
             c.execute(
                 """UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
-                   target_roles=?, cv_text=?, cv_analysis=?, updated_at=? WHERE id=1""",
+                   target_roles=?, cv_text=?, cv_analysis=?, experience_level=?,
+                   excluded_skills=?, excluded_job_terms=?, updated_at=? WHERE id=1""",
                 (
                     name, citizenship, residence, degree, skills, target_roles, cv_text,
-                    cv_analysis_json, now_iso,
+                    cv_analysis_json, experience_level, excluded_skills, excluded_job_terms,
+                    now_iso,
                 ),
             )
         
@@ -1257,32 +1308,32 @@ def settings(msg: str = ""):
       </div>
     </div>
     
-    <div class='panel' style='background:#fcfaff; border-color:#e3d2fc;'>
+    <div class='panel' style='background:#f1f4ff; border-color:#cbd2ff;'>
       <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>
         <div>
-          <span class='pill' style='background:#f3eaff; color:#6225b5; font-weight:800; font-size:11px;'>BEHAVIORAL REINFORCEMENT LEARNING</span>
+          <span class='pill' style='background:#f1f4ff; color:#4057d4; font-weight:800; font-size:11px;'>BEHAVIORAL REINFORCEMENT LEARNING</span>
           <h3 style='margin:8px 0 4px;'>Continuous Agent Training & Click Tracking</h3>
-          <p style='color:#584a6b; margin:0; font-size:14px;'>Agents and Workers dynamically train on your clicks, shortlists, and application choices via persistent session cookies. Status: <b>{esc(training_info['stage'])}</b> ({training_info['total_events']} events logged).</p>
+          <p style='color:#735d69; margin:0; font-size:14px;'>Agents and Workers dynamically train on your clicks, shortlists, and application choices via persistent session cookies. Status: <b>{esc(training_info['stage'])}</b> ({training_info['total_events']} events logged).</p>
         </div>
         <form method='post' action='/training/reset' onsubmit='return confirm("Reset learned agent memory back to initial calibration?");'>
-          <button type='submit' class='btn-subtle btn-sm' style='color:#b3261e; border-color:#f2b8b5;'>Reset Agent Memory</button>
+          <button type='submit' class='btn-subtle btn-sm' style='color:#790a3d; border-color:#d7afbf;'>Reset Agent Memory</button>
         </form>
       </div>
       <div style='display:flex; gap:12px; margin-top:16px; flex-wrap:wrap;'>
-        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
-          <strong style='font-size:20px; color:#6225b5;'>{training_info['clicks']}</strong>
+        <div style='background:#fff; border:1px solid #cbd2ff; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#4057d4;'>{training_info['clicks']}</strong>
           <small style='display:block; color:#777;'>Vacancy Clicks</small>
         </div>
-        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
-          <strong style='font-size:20px; color:#6225b5;'>{training_info['shortlists']}</strong>
+        <div style='background:#fff; border:1px solid #cbd2ff; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#4057d4;'>{training_info['shortlists']}</strong>
           <small style='display:block; color:#777;'>Shortlists Learned</small>
         </div>
-        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
-          <strong style='font-size:20px; color:#6225b5;'>{training_info['applies']}</strong>
+        <div style='background:#fff; border:1px solid #cbd2ff; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#4057d4;'>{training_info['applies']}</strong>
           <small style='display:block; color:#777;'>Applied Decisions</small>
         </div>
-        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
-          <strong style='font-size:20px; color:#6225b5;'>{training_info['dismisses']}</strong>
+        <div style='background:#fff; border:1px solid #cbd2ff; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#4057d4;'>{training_info['dismisses']}</strong>
           <small style='display:block; color:#777;'>Dismissed Penalties</small>
         </div>
       </div>

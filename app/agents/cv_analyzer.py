@@ -210,3 +210,95 @@ def score_cv_match(job: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, An
         "matched_roles": role_matches[:3],
         "recommended_roles": analysis.get("roles", []),
     }
+
+
+def assess_candidate_constraints(job: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply explicit candidate seniority and role/skill exclusions before Jury selection."""
+    title = (job.get("title") or "").lower()
+    description = (job.get("description") or "").lower()
+    reasons = []
+
+    experience_level = (profile.get("experience_level") or "entry-level").strip().lower()
+    if experience_level == "entry-level":
+        if re.search(r"\b(?:senior|sr\.?|lead|principal|staff|head of)\b", title):
+            reasons.append("The title is senior or lead level, outside the candidate's entry-level preference.")
+        years_required = re.search(
+            r"\b(?:at least|minimum of|required|requires?|requiring)\s+"
+            r"(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:professional\s+|relevant\s+|industry\s+)?experience\b",
+            description,
+        )
+        if years_required and int(years_required.group(1)) > 2:
+            reasons.append(
+                f"The posting requires {years_required.group(1)}+ years of experience, above the entry-level limit."
+            )
+        if re.search(
+            r"\b(?:experienced|seasoned)\s+(?:(?:software|backend|back-end|full[- ]stack)\s+)?"
+            r"(?:engineers?|developers?|programmers?)\b",
+            description,
+        ):
+            reasons.append("The description asks for experienced engineers or developers rather than entry-level candidates.")
+
+    excluded_skills = [
+        skill.strip()
+        for skill in (profile.get("excluded_skills") or "Rust").split(",")
+        if skill.strip()
+    ]
+    for skill in excluded_skills:
+        if re.search(r"(?<!\w)" + re.escape(skill.lower()) + r"(?!\w)", f"{title} {description}"):
+            reasons.append(f"The role asks for {skill}, which the candidate has explicitly said they do not know.")
+
+    excluded_job_terms = [
+        term.strip()
+        for term in (profile.get("excluded_job_terms") or "backend, back-end, full-stack, full stack").split(",")
+        if term.strip()
+    ]
+    role_text = f"{title} {description}"
+    for term in excluded_job_terms:
+        term_pattern = re.escape(term.lower()).replace(r"\ ", r"[\s-]*")
+        if re.search(r"(?<!\w)" + term_pattern + r"(?!\w)", title):
+            reasons.append(f"The job title indicates {term}, outside the candidate's preferred experience.")
+        elif re.search(
+            r"(?<!\w)" + term_pattern
+            + r"\s+(?:development|engineering|engineer|developer|services|systems|apis)(?!\w)",
+            role_text,
+        ):
+            reasons.append(f"The description identifies the role as focused on {term}.")
+
+    citizenship = (profile.get("citizenship") or "").lower()
+    if "saudi" not in citizenship:
+        nationality_restrictions = (
+            r"\bsaudi nationals? only\b",
+            r"\bonly saudi nationals?\b",
+            r"\bsaudi citizens? only\b",
+            r"\bonly saudi citizens?\b",
+            r"\bmust be (?:a )?saudi (?:national|citizen)\b",
+            r"\bsaudi nationality required\b",
+            r"\breserved for saudi (?:nationals?|citizens?)\b",
+        )
+        if any(
+            re.search(pattern, f"{title} {description}")
+            for pattern in nationality_restrictions
+        ):
+            reasons.append(
+                "The posting is restricted to Saudi nationals or citizens, while the candidate profile lists a different citizenship."
+            )
+
+    residence = (profile.get("residence") or "").strip()
+    preferred_city = residence.split(",", 1)[0].strip()
+    job_location = (job.get("location") or "").strip()
+    matches_preferred_city = bool(
+        preferred_city
+        and job_location
+        and re.search(
+            r"(?<!\w)" + re.escape(preferred_city) + r"(?!\w)",
+            job_location,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    return {
+        "eligible": not reasons,
+        "reasons": list(dict.fromkeys(reasons)),
+        "preferred_city": preferred_city,
+        "matches_preferred_city": matches_preferred_city,
+    }

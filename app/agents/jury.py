@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Tuple
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
-from app.agents.cv_analyzer import score_cv_match
+from app.agents.cv_analyzer import assess_candidate_constraints, score_cv_match
 from datetime import datetime, timezone
 
 class SupremeJuryAgent:
@@ -19,6 +19,7 @@ class SupremeJuryAgent:
         sw_eval = self.software_agent.evaluate_job(job, profile)
         qa_eval = self.qa_agent.evaluate_job(job, profile)
         cv_match = score_cv_match(job, profile)
+        preference_check = assess_candidate_constraints(job, profile)
         visa_eval = self.visa_agent.evaluate_job(job, profile)
 
         # Step 2: Debate Round - Agents challenge and comment on each other's domain perspectives
@@ -132,6 +133,46 @@ class SupremeJuryAgent:
             "score": cv_match["score"]
         })
 
+        preference_statement = (
+            "OBJECTION: " + " ".join(preference_check["reasons"])
+            if preference_check["reasons"]
+            else (
+                "The listing does not conflict with the candidate's entry-level preference, "
+                "stated skill exclusions, or avoided role types."
+            )
+        )
+        arguments.append({
+            "agent_name": "Candidate Experience Fit Examiner",
+            "agent_role": "Seniority, Skills & Role Preference Review",
+            "avatar": "🧭",
+            "type": "candidate_constraints",
+            "statement": preference_statement,
+            "score": 100 if preference_check["eligible"] else 0,
+        })
+
+        if preference_check["preferred_city"] and preference_check["matches_preferred_city"]:
+            location_statement = (
+                f"The posting is in {preference_check['preferred_city']}, the candidate's preferred city. "
+                "Prioritize it over otherwise comparable roles in other locations."
+            )
+        elif preference_check["preferred_city"]:
+            location_statement = (
+                f"The posting is not listed in {preference_check['preferred_city']}. "
+                "Keep it as a fallback if it otherwise qualifies, but rank matching-city jobs first."
+            )
+        else:
+            location_statement = (
+                "No preferred city is saved in the candidate profile; location is neutral."
+            )
+        arguments.append({
+            "agent_name": "City Preference Examiner",
+            "agent_role": "Candidate Location Priority",
+            "avatar": "📍",
+            "type": "location_preference",
+            "statement": location_statement,
+            "score": 100 if preference_check["matches_preferred_city"] else 50,
+        })
+
         # Step 3: Learned Preferences Agent Feedback
         if learned_reasons:
             arguments.append({
@@ -158,7 +199,11 @@ class SupremeJuryAgent:
             + (cv_match["score"] * 0.25)
         )
 
-        if liveness_status in ("expired", "unavailable") or authenticity_status == "suspicious":
+        if (
+            liveness_status in ("expired", "unavailable")
+            or authenticity_status == "suspicious"
+            or not preference_check["eligible"]
+        ):
             consensus_score = 0
         elif has_blocker:
             consensus_score = min(base_score, 20)
@@ -191,6 +236,13 @@ class SupremeJuryAgent:
             verdict_status = "REJECTED BY JURY (SUSPICIOUS POSTING LINK)"
             summary = "The Jury found a clear security red flag in the posting destination."
             recommendation = "Do not apply through this link or enter personal information. Find the role through the employer's official careers page."
+        elif not preference_check["eligible"]:
+            verdict_status = "REJECTED BY JURY (CANDIDATE EXPERIENCE MISMATCH)"
+            summary = "The posting conflicts with the candidate's stated experience level, skill exclusions, or preferred role types."
+            recommendation = (
+                "Do not prioritize this role. "
+                + " ".join(preference_check["reasons"])
+            )
         elif not listing_available:
             verdict_status = "DEFERRED BY JURY (AVAILABILITY UNVERIFIED)"
             summary = "The Jury could not verify that the posting page is reachable and available."
@@ -242,11 +294,14 @@ class SupremeJuryAgent:
             "visa_evidence": visa_eval.get("visa_evidence", "Not verified"),
             "housing_evidence": visa_eval.get("housing_evidence", "Not verified"),
             "arguments": arguments,
+            "preferred_city": preference_check["preferred_city"],
+            "matches_preferred_city": preference_check["matches_preferred_city"],
             "is_selected": (
                 consensus_score >= 65
                 and not has_blocker
                 and listing_available
                 and authenticity_status != "suspicious"
+                and preference_check["eligible"]
             )
         }
 
@@ -270,20 +325,29 @@ class SupremeJuryAgent:
             job_copy["visa_evidence"] = delib["visa_evidence"]
             job_copy["housing_evidence"] = delib["housing_evidence"]
             job_copy["arguments"] = delib["arguments"]
+            job_copy["preferred_city"] = delib["preferred_city"]
+            job_copy["matches_preferred_city"] = delib["matches_preferred_city"]
             job_copy["is_daily_pick"] = 0
             deliberated_jobs.append(job_copy)
 
         # Sort by consensus jury score descending
-        deliberated_jobs.sort(key=lambda x: x["jury_score"], reverse=True)
+        deliberated_jobs.sort(
+            key=lambda x: (x["matches_preferred_city"], x["jury_score"]),
+            reverse=True,
+        )
 
-        # Crown top picks (excluding rejected ones)
+        # Crown the highest-ranked majority-approved live jobs, up to the daily limit.
         crowned_count = 0
         for j in deliberated_jobs:
             if (
                 crowned_count < max_daily_picks
-                and j["jury_score"] >= 60
-                and "REJECTED" not in j["verdict_status"]
+                and j["jury_score"] >= 50
+                and j["verdict_status"] in (
+                    "UNANIMOUS JURY APPROVAL — DAILY ROSTER",
+                    "APPROVED BY MAJORITY VOTE",
+                )
                 and j.get("liveness_status") == "live"
+                and j.get("authenticity_status", "unverified") != "suspicious"
             ):
                 j["is_daily_pick"] = 1
                 crowned_count += 1
