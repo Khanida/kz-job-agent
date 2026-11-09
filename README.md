@@ -1,4 +1,4 @@
-# Adeena's Job Agent — Multi-Agent Career Radar
+# Khanida's Job Agent — Multi-Agent Career Radar
 
 An intelligent, hierarchical multi-agent job discovery system that scouts live vacancies, validates recruitment recency, stages cross-examination debates between specialized Sub-Agents, and convenes a Supreme Jury to arbitrate and crown your final daily selection.
 
@@ -25,7 +25,7 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Jury Room UI** (`/jury`): Interactive court viewer showing live agent speeches, cross-examination challenges, and the Supreme Jury's verdicts.
 - **Daily Selection Shelf**: Highlights up to five of the day's winning roles on the main dashboard.
 - **Daily refresh**: The app reruns the worker, Sub-Agent, and Jury workflow at midnight UTC and catches up on startup if the service was offline. Use **Refresh Today’s Top 5** on the dashboard to run it manually.
-- **Posting and employer-link debate**: Each refresh checks whether the posting page is reachable, closed, expired, or unverified, then reviews the final redirected URL for HTTPS, an employer-name match, or a known recruiting platform. The Jury records this evidence separately from availability, rejects clear link red flags, and warns when authenticity cannot be established. A domain match or recruiting platform is only a positive signal, not proof that an employer or vacancy is genuine.
+- **Posting availability debate**: Each refresh checks the job page, records whether it is reachable, closed, expired, or unverified, and adds that evidence to the Jury debate. Only reachable postings can enter the daily top five; expired and unverified links are not presented as confirmed openings.
 - **CV-based role matching**: Text extracted from PDF, DOCX, TXT, or Markdown CVs is analyzed locally for skills and likely target roles. The suggestions are editable in the profile and feed a dedicated CV-alignment score in every Jury decision and daily selection.
 - **Animated workflow**: The dashboard illustrates workers collecting job files, Sub-Agents debating, and the Jury ranking the daily top five whenever the page loads.
 - **Live Liveness & Recency Indicators**: Real-time tags (`🟢 Live on Website`, `📅 Recently posted`).
