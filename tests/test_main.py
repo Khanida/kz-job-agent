@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app, get_db, esc
 from app.agents.workers import CuratedEmployerScout
@@ -24,6 +25,47 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("ADEENA'S JOB AGENT", response.text)
         self.assertIn("OPPORTUNITIES PIPELINE", response.text)
         self.assertIn("Daily Selection", response.text)
+        self.assertIn("Refresh Today’s Top 5", response.text)
+        self.assertIn("data-agent-flow", response.text)
+        self.assertIn("Workers scout", response.text)
+        self.assertIn("Agents debate", response.text)
+        self.assertIn("Jury decides", response.text)
+
+    def test_daily_refresh_button_runs_jury_workflow(self):
+        with patch("app.main.run_jury_deliberation_workflow", new_callable=AsyncMock) as workflow:
+            workflow.return_value = {"crowned_count": 5}
+            response = self.client.post("/daily-refresh", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/?msg=", response.headers["location"])
+        workflow.assert_awaited_once()
+
+    def test_daily_pick_links_to_job_posting(self):
+        job_id = "daily-pick-link-test"
+        with get_db() as c:
+            previous_picks = [
+                row["id"] for row in c.execute("SELECT id FROM jobs WHERE is_daily_pick=1").fetchall()
+            ]
+            c.execute("UPDATE jobs SET is_daily_pick=0")
+            c.execute("""
+                INSERT OR REPLACE INTO jobs
+                (id, title, company, location, url, source, score, jury_score, is_daily_pick, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'new', ?)
+            """, (
+                job_id, "Link Test Engineer", "Link Test Co", "Remote",
+                "https://careers.example.com/jobs/123", "Test",
+                90, 90, "2026-11-10T00:00:00+00:00"
+            ))
+
+        try:
+            response = self.client.get("/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(f"href='/track/click/{job_id}'", response.text)
+            self.assertIn("Apply / View posting", response.text)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                c.executemany("UPDATE jobs SET is_daily_pick=1 WHERE id=?", [(pick_id,) for pick_id in previous_picks])
 
     def test_jury_room_page(self):
         response = self.client.get("/jury")

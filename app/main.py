@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
 import sqlite3, os, json, re, hashlib, html
-from datetime import datetime, timezone
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
 from app.agents.orchestrator import run_jury_deliberation_workflow, run_discovery_workers
@@ -16,6 +18,8 @@ APP_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(APP_DIR.parent / "jobs.db"))
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(APP_DIR.parent / "uploads" / "cv")))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger(__name__)
+daily_refresh_lock = asyncio.Lock()
 
 @contextmanager
 def get_db():
@@ -102,16 +106,49 @@ def init_db():
         
         init_learner_db(c)
 
+
+async def refresh_daily_selection_if_due(force: bool = False):
+    async with daily_refresh_lock:
+        with get_db() as c:
+            today = datetime.now(timezone.utc).date().isoformat()
+            latest = c.execute(
+                "SELECT session_date, top_picks_count FROM deliberations ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if not force and latest and latest["session_date"] == today:
+                return {"skipped": True, "crowned_count": latest["top_picks_count"] or 0}
+
+            p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+            return await run_jury_deliberation_workflow(c, dict(p))
+
+
+async def daily_refresh_scheduler():
+    while True:
+        now = datetime.now(timezone.utc)
+        next_midnight = datetime.combine(
+            now.date() + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        await asyncio.sleep((next_midnight - now).total_seconds())
+        try:
+            await refresh_daily_selection_if_due()
+        except Exception:
+            logger.exception("Automatic daily job refresh failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # If deliberations table is empty, run an initial deliberation pass so the Jury Room is populated immediately
-    with get_db() as c:
-        delib_count = c.execute("SELECT COUNT(*) FROM deliberations").fetchone()[0]
-        if delib_count == 0:
-            p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-            await run_jury_deliberation_workflow(c, dict(p))
-    yield
+    await refresh_daily_selection_if_due()
+    scheduler_task = asyncio.create_task(daily_refresh_scheduler())
+    try:
+        yield
+    finally:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(title="Adeena's Job Agent", lifespan=lifespan)
 
@@ -198,6 +235,50 @@ def layout(body, active_nav="dashboard"):
   <footer>
     Private workspace · Multi-Agent hierarchical screening & Supreme Jury arbitration · Decisions remain strictly under your control
   </footer>
+  <script>
+    (() => {{
+      const flow = document.querySelector("[data-agent-flow]");
+      const refreshForm = document.querySelector("[data-refresh-form]");
+      if (refreshForm) {{
+        refreshForm.addEventListener("submit", () => {{
+          const button = refreshForm.querySelector("[data-refresh-button]");
+          if (button) {{
+            button.disabled = true;
+            button.textContent = "Refreshing today’s picks…";
+          }}
+        }});
+      }}
+
+      if (!flow) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {{
+        flow.querySelector("[data-flow-status]").textContent =
+          "Workers scout, Sub-Agents debate, and the Jury ranks today’s top five.";
+        return;
+      }}
+
+      const stages = [...flow.querySelectorAll("[data-flow-stage]")];
+      const status = flow.querySelector("[data-flow-status]");
+      const updates = [
+        "Workers are collecting fresh job files…",
+        "Worker dossiers are being submitted to the Sub-Agents…",
+        "Sub-Agents are debating fit, quality, and relocation…",
+        "The Jury is weighing the arguments and ranking today’s top five…"
+      ];
+      let activeStage = 0;
+
+      const advance = () => {{
+        stages.forEach((stage, index) => {{
+          stage.classList.toggle("is-active", index === activeStage);
+          stage.classList.toggle("is-complete", index < activeStage);
+        }});
+        status.textContent = updates[activeStage];
+        activeStage = (activeStage + 1) % stages.length;
+      }};
+
+      advance();
+      window.setInterval(advance, 2400);
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -218,8 +299,11 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         daily_picks = c.execute("""
             SELECT * FROM jobs
             WHERE is_daily_pick = 1 AND status != 'dismissed'
-            ORDER BY jury_score DESC, score DESC LIMIT 4
+            ORDER BY jury_score DESC, score DESC LIMIT 5
         """).fetchall()
+        latest_deliberation = c.execute(
+            "SELECT session_date FROM deliberations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
 
         # Build pipeline query
         query = "SELECT * FROM jobs WHERE 1=1"
@@ -303,7 +387,6 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             dp_advocate = esc(dp["advocate_agent"] or "Supreme Jury")
             dp_score = dp["jury_score"] or dp["score"] or 0
             dp_verdict = esc(dp["jury_verdict"] or "Approved by Jury")
-            dp_url = esc(dp["url"])
             dp_status = dp["status"] or "new"
 
             action_btn = (
@@ -331,7 +414,10 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 </div>
               </div>
               <div class='job-footer'>
-                <a href='/jury#{dp_id}' style='font-size:12px; color:#966100; font-weight:700;'>Read Debate & Verdict →</a>
+                <div class='daily-card-links'>
+                  <a class='apply-link' target='_blank' rel='noopener noreferrer' href='/track/click/{dp_id}'>Apply / View posting ↗</a>
+                  <a href='/jury#{dp_id}' style='font-size:12px; color:#966100; font-weight:700;'>Read Debate & Verdict →</a>
+                </div>
                 <div class='job-actions'>
                   {action_btn}
                 </div>
@@ -445,7 +531,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             {f"<div style='margin-bottom:12px; font-size:12px;'><b>Advocate:</b> {advocate_badge}</div>" if advocate_badge else ""}
           </div>
           <div class='job-footer'>
-            <a target='_blank' rel='noopener noreferrer' href='/track/click/{j_id}' style='font-size:13px'>View vacancy ↗</a>
+            <a class='apply-link' target='_blank' rel='noopener noreferrer' href='/track/click/{j_id}'>Apply / View posting ↗</a>
             <div class='job-actions'>
               {action_buttons}
             </div>
@@ -466,6 +552,8 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
 
     flash_banner = f"<div class='notice notice-info'>{esc(msg)}</div>" if msg else ""
 
+    last_refresh = latest_deliberation["session_date"] if latest_deliberation else "Not yet run"
+
     return layout(f"""
     {flash_banner}
     <section class='hero'>
@@ -476,11 +564,53 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         <form method='post' action='/convene-jury'>
           <button type='submit' class='btn btn-gold'>⚖️ Convene Supreme Jury & Debate</button>
         </form>
-        <form method='post' action='/scan'>
-          <button type='submit' class='btn btn-secondary'>✦ Run Worker Scout Sweep</button>
+        <form method='post' action='/daily-refresh' data-refresh-form>
+          <button type='submit' class='btn btn-secondary' data-refresh-button>↻ Refresh Today’s Top 5</button>
         </form>
         <a href='/jury' class='btn btn-subtle'>Open Jury Room →</a>
       </div>
+      <p class='refresh-note'>Last selection: {esc(last_refresh)} UTC · Automatic refresh daily at midnight UTC</p>
+    </section>
+
+    <section class='agent-flow' data-agent-flow aria-label='Daily job selection process'>
+      <div class='flow-heading'>
+        <div>
+          <p class='eyebrow'>TODAY’S SELECTION, IN MOTION</p>
+          <h2>From job files to the Jury’s top five</h2>
+        </div>
+        <span class='flow-live'><span></span> DAILY REVIEW</span>
+      </div>
+      <div class='flow-stages'>
+        <div class='flow-stage is-active' data-flow-stage='0'>
+          <span class='flow-icon' aria-hidden='true'>🧑‍💼</span>
+          <strong>Workers scout</strong>
+          <small>Collect fresh job files</small>
+          <span class='flow-files' aria-hidden='true'><i>▤</i><i>▤</i><i>▤</i></span>
+        </div>
+        <span class='flow-arrow' aria-hidden='true'>→</span>
+        <div class='flow-stage' data-flow-stage='1'>
+          <span class='flow-icon' aria-hidden='true'>📂</span>
+          <strong>Submit dossiers</strong>
+          <small>Send files to Sub-Agents</small>
+          <span class='flow-files' aria-hidden='true'><i>▤</i><i>▤</i><i>▤</i></span>
+        </div>
+        <span class='flow-arrow' aria-hidden='true'>→</span>
+        <div class='flow-stage' data-flow-stage='2'>
+          <span class='flow-icon' aria-hidden='true'>💻 🎯 🌍</span>
+          <strong>Agents debate</strong>
+          <small>Challenge each other’s picks</small>
+          <span class='flow-debate' aria-hidden='true'>“Strong fit!” · “What about visa?”</span>
+        </div>
+        <span class='flow-arrow' aria-hidden='true'>→</span>
+        <div class='flow-stage flow-jury' data-flow-stage='3'>
+          <span class='flow-icon' aria-hidden='true'>⚖️</span>
+          <strong>Jury decides</strong>
+          <small>Rank today’s top five</small>
+          <span class='flow-top-five' aria-label='Five daily selections'>01&nbsp; 02&nbsp; 03&nbsp; 04&nbsp; 05</span>
+        </div>
+      </div>
+      <p class='flow-status' data-flow-status>Workers are collecting fresh job files…</p>
+      <p class='flow-footnote'>Your ranked selections appear below. Applications are always reviewed and submitted by you.</p>
     </section>
 
     {daily_shelf_html}
@@ -740,9 +870,7 @@ def jury_room(msg: str = ""):
 
 @app.post("/convene-jury")
 async def convene_jury():
-    with get_db() as c:
-        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        result = await run_jury_deliberation_workflow(c, dict(p))
+    result = await refresh_daily_selection_if_due(force=True)
     
     count = result.get("crowned_count", 0)
     msg = f"Supreme Jury session concluded! Evaluated live vacancies and crowned {count} Daily Selection roles."
@@ -867,8 +995,7 @@ async def save_profile(
                          target_roles=?, cv_text=?, updated_at=? WHERE id=1""",
                       (name, citizenship, residence, degree, skills, target_roles, cv_text, now_iso))
         
-        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        await run_jury_deliberation_workflow(c, dict(p))
+    await refresh_daily_selection_if_due(force=True)
 
     upload_msg = f"CV '{uploaded_filename}' uploaded and parsed! " if uploaded_filename else ""
     msg = f"{upload_msg}Profile saved! Supreme Jury re-convened and updated the daily roster."
@@ -940,26 +1067,27 @@ def shortlist(job_id: str):
 
 @app.post("/scan")
 async def scan():
-    with get_db() as c:
-        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        result = await run_jury_deliberation_workflow(c, dict(p))
+    result = await refresh_daily_selection_if_due(force=True)
     
     count = result.get("crowned_count", 0)
     return RedirectResponse(f"/?msg=" + quote_plus(f"Worker sweep & Jury deliberation complete! Crowned {count} Daily Selection roles."), status_code=303)
 
 @app.post("/rescore")
 async def rescore():
-    with get_db() as c:
-        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        await run_jury_deliberation_workflow(c, dict(p))
+    await refresh_daily_selection_if_due(force=True)
     return RedirectResponse("/jury?msg=" + quote_plus("All vacancies re-deliberated and re-scored by the Supreme Jury!"), status_code=303)
 
 @app.post("/seed")
 async def seed_curated():
-    with get_db() as c:
-        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        await run_jury_deliberation_workflow(c, dict(p))
+    await refresh_daily_selection_if_due(force=True)
     return RedirectResponse("/?msg=" + quote_plus("Curated roles synchronized and reviewed by the Supreme Jury!"), status_code=303)
+
+@app.post("/daily-refresh")
+async def daily_refresh():
+    result = await refresh_daily_selection_if_due(force=True)
+    count = result.get("crowned_count", 0)
+    msg = f"Daily refresh complete! The Supreme Jury ranked {count} roles for today."
+    return RedirectResponse("/?msg=" + quote_plus(msg), status_code=303)
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings(msg: str = ""):

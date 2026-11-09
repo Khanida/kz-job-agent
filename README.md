@@ -23,7 +23,9 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 
 ## Features Included
 - **Jury Room UI** (`/jury`): Interactive court viewer showing live agent speeches, cross-examination challenges, and the Supreme Jury's verdicts.
-- **Daily Selection Shelf**: Highlights the day's winning roles on the main dashboard.
+- **Daily Selection Shelf**: Highlights up to five of the day's winning roles on the main dashboard.
+- **Daily refresh**: The app reruns the worker, Sub-Agent, and Jury workflow at midnight UTC and catches up on startup if the service was offline. Use **Refresh Today’s Top 5** on the dashboard to run it manually.
+- **Animated workflow**: The dashboard illustrates workers collecting job files, Sub-Agents debating, and the Jury ranking the daily top five whenever the page loads.
 - **Live Liveness & Recency Indicators**: Real-time tags (`🟢 Live on Website`, `📅 Recently posted`).
 - **Pipeline Workflow**: Status transitions (`New`, `Shortlisted`, `Applied`, `Dismissed`) logged in SQLite.
 - **Candidate Profile Matrix** (`/profile`): Custom matching criteria, skills, and CV summary.
@@ -38,7 +40,7 @@ Before production:
 3. Add employer ATS integrations (Greenhouse/Lever) and source-specific terms/rate limits.
 4. Add an evidence-backed verification pipeline with source URLs and timestamps.
 5. Add encrypted CV storage and secrets management.
-6. Add scheduled worker and email notifications.
+6. Move scheduled work to a dedicated worker if the web service is scaled to multiple instances.
 7. Add an application preparation/review queue. Submission should require explicit approval for each employer/application until a safe, accurate authorization model is established.
 
 ## Run locally
