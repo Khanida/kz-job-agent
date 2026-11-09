@@ -31,6 +31,11 @@ uvicorn app.main:app --reload
 ```
 Open http://127.0.0.1:8000
 
+## Run tests
+```bash
+python -m unittest tests/test_main.py
+```
+
 ## Deploy on Render
 Push this repository to GitHub, then create a Render Blueprint from `render.yaml`.
 The Blueprint provisions a web service and persistent disk. For production, connect PostgreSQL and configure secrets in Render's dashboard.
