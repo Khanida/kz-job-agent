@@ -1,4 +1,4 @@
-# Adeena's Job Agent — Multi-Agent Career Radar
+# Khanida's Job Agent — Multi-Agent Career Radar
 
 An intelligent, hierarchical multi-agent job discovery system that scouts live vacancies, validates recruitment recency, stages cross-examination debates between specialized Sub-Agents, and convenes a Supreme Jury to arbitrate and crown your final daily selection.
 
