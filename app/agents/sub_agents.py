@@ -42,7 +42,7 @@ class SoftwareSystemsAgent(BaseSubAgent):
         # Build pitch
         tech_str = ", ".join(matched_tech[:4]) if matched_tech else "core engineering foundations"
         if is_engineer and is_junior_or_grad:
-            pitch = f"Strong engineering nomination: Perfectly calibrated for Adeena's Computer Systems background with direct stack alignment on {tech_str}."
+            pitch = f"Strong engineering nomination: Directly aligned with the candidate's engineering profile and stack evidence on {tech_str}."
         elif is_engineer:
             pitch = f"Technically ambitious engineering role utilizing {tech_str}. High growth potential."
         else:
@@ -52,7 +52,7 @@ class SoftwareSystemsAgent(BaseSubAgent):
         if any(term in title for term in ["senior", "lead", "principal", "staff"]):
             concerns.append("Seniority title may require significant prior enterprise leadership experience.")
         if len(matched_tech) == 0:
-            concerns.append("Lacks explicit mention of Adeena's primary programming languages.")
+            concerns.append("Lacks explicit evidence of the candidate's primary programming skills.")
 
         return {
             "score": score,
@@ -69,7 +69,7 @@ class SoftwareSystemsAgent(BaseSubAgent):
         if any(term in title for term in ["senior", "lead", "principal", "head"]):
             return {
                 "stance": "Dissent / Caution",
-                "argument": f"I caution the Jury: {target_job.get('title')} at {target_job.get('company')} is tagged as a Senior/Lead position. As a graduate engineer, Adeena risks immediate resume screening rejection without an entry-level pathway."
+                "argument": f"I caution the Jury: {target_job.get('title')} at {target_job.get('company')} is tagged as a Senior/Lead position. Applicants without matching senior experience may face immediate screening rejection."
             }
         if not any(term in desc for term in ["python", "c++", "java", "code", "programming", "software", "git", "engineering"]):
             return {
@@ -106,7 +106,7 @@ class QualityOperationsAgent(BaseSubAgent):
 
         matches_str = ", ".join(matched_qa[:4]) if matched_qa else "reliability and diagnostics"
         if is_qa_or_support and is_accessible:
-            pitch = f"Exceptional operational opportunity: Directly aligns with Adeena's QA, IT Support, and Systems Engineering objectives ({matches_str})."
+            pitch = f"Exceptional operational opportunity: Directly aligns with the candidate's QA, IT Support, and Systems Engineering objectives ({matches_str})."
         elif is_qa_or_support:
             pitch = f"Solid test and quality analysis position touching {matches_str}."
         else:
@@ -136,7 +136,7 @@ class QualityOperationsAgent(BaseSubAgent):
         if any(term in desc for term in ["10+ years", "8+ years", "extensive track record"]):
             return {
                 "stance": "Dissent",
-                "argument": f"The job requirements at {target_job.get('company')} indicate an unrealistic barrier for a recent graduate. We must protect Adeena's application quota from automatic filtering."
+                "argument": f"The job requirements at {target_job.get('company')} indicate a high experience barrier. We should protect the candidate's application time from likely automatic filtering."
             }
         return {
             "stance": "Neutral",
@@ -222,16 +222,18 @@ class RelocationVisaAgent(BaseSubAgent):
         text = f"{target_job.get('title', '')} {target_job.get('description', '')}".lower()
         blockers = [k for k in self.BLOCKER_KEYWORDS if k in text]
         if blockers:
+            citizenship = profile.get("citizenship") or "the candidate's"
+            residence = profile.get("residence") or "current location"
             return {
                 "stance": "Strict Veto / Block",
-                "argument": f"OBJECTION TO {opponent_agent_name}: {target_job.get('company')} states '{blockers[0]}'. Even with exceptional CV alignment, Adeena will be legally filtered out as a Pakistani national residing in KSA without existing local residency."
+                "argument": f"OBJECTION TO {opponent_agent_name}: {target_job.get('company')} states '{blockers[0]}'. This may prevent a candidate with citizenship '{citizenship}' currently based in '{residence}' from qualifying."
             }
         has_visa = any(k in text for k in self.VISA_KEYWORDS)
         is_remote = any(k in target_job.get("location", "").lower() for k in ["remote", "worldwide", "global"])
         if has_visa:
             return {
                 "stance": "Strong Endorsement",
-                "argument": f"Full endorsement: {target_job.get('company')} provides genuine relocation pathways. This protects Adeena from wasting applications on closed domestic markets."
+                "argument": f"Full endorsement: {target_job.get('company')} provides relocation pathways that may make this role accessible to international candidates."
             }
         elif is_remote:
             return {
@@ -243,4 +245,3 @@ class RelocationVisaAgent(BaseSubAgent):
                 "stance": "Caution",
                 "argument": f"Proceed with eyes open: {target_job.get('company')} does not advertise visa sponsorship. Unless an exceptional referral is available, international approval is uncertain."
             }
-

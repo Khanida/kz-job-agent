@@ -714,6 +714,21 @@ button:hover, .btn:hover {
   color: #1f642a;
   border: 1px solid #b7e3b9;
 }
+.pill-unverified {
+  background: #fff8eb;
+  color: #8d5b12;
+  border: 1px solid #f0d5a3;
+}
+.pill-expired {
+  background: #fff0ef;
+  color: #a12c27;
+  border: 1px solid #edc3c0;
+}
+.posting-unavailable {
+  color: #a12c27;
+  font-size: 12px;
+  font-weight: 750;
+}
 
 .score-badge {
   font-size: 12px;
@@ -840,6 +855,26 @@ textarea {
   padding: 20px 24px;
   margin-bottom: 28px;
   box-shadow: 0 4px 16px rgba(98, 37, 181, 0.05);
+}
+.cv-analysis {
+  border-color: #d7e3d3;
+  background: linear-gradient(135deg, #fff 0%, #f5f8f2 100%);
+}
+.cv-analysis h2 {
+  margin: 4px 0 8px;
+  font-size: 21px;
+}
+.cv-analysis > p:not(.eyebrow) {
+  margin-top: 0;
+  color: var(--text-muted);
+}
+.cv-analysis-group {
+  margin: 14px 0;
+}
+.cv-analysis-group > strong {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 13px;
 }
 
 .muted {

@@ -1,9 +1,12 @@
 import unittest
 import asyncio
+import json
+import httpx
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app, get_db, esc
-from app.agents.workers import CuratedEmployerScout
+from app.agents.cv_analyzer import analyze_cv, score_cv_match
+from app.agents.workers import BaseWorker, CuratedEmployerScout
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
 from app.agents.jury import SupremeJuryAgent
 
@@ -67,6 +70,28 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
                 c.executemany("UPDATE jobs SET is_daily_pick=1 WHERE id=?", [(pick_id,) for pick_id in previous_picks])
 
+    def test_dashboard_marks_unavailable_jobs_and_hides_apply_link(self):
+        job_id = "expired-job-link-test"
+        with get_db() as c:
+            c.execute("""
+                INSERT OR REPLACE INTO jobs
+                (id, title, company, location, url, source, score, jury_score, liveness_status, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'expired', 'new', ?)
+            """, (
+                job_id, "Expired Engineer", "Old Company", "Remote",
+                "https://careers.example.com/jobs/expired", "Test",
+                75, 75, "2026-11-10T00:00:00+00:00"
+            ))
+
+        try:
+            response = self.client.get("/")
+            self.assertIn("Posting link returned 404/410", response.text)
+            self.assertIn("Posting link unavailable", response.text)
+            self.assertNotIn(f"href='/track/click/{job_id}'", response.text)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
     def test_jury_room_page(self):
         response = self.client.get("/jury")
         self.assertEqual(response.status_code, 200)
@@ -113,6 +138,73 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         challenge = visa_agent.challenge(test_job, sw_agent.name, profile)
         self.assertIn("Endorsement", challenge["stance"])
 
+    def test_cv_analysis_recommends_roles_and_matches_job(self):
+        cv_text = (
+            "Graduate Embedded Systems Engineer with C++, Python, firmware, "
+            "microcontroller and hardware interfacing experience."
+        )
+        analysis = analyze_cv(cv_text)
+
+        self.assertIn("C++", analysis["skills"])
+        self.assertIn("Embedded Systems", analysis["skills"])
+        self.assertIn("Junior Embedded Systems Engineer", analysis["roles"])
+
+        match = score_cv_match(
+            {
+                "title": "Junior Embedded Systems Engineer",
+                "description": "C++ firmware and microcontroller development",
+            },
+            {"cv_text": cv_text, "cv_analysis": analysis, "skills": "C++, Python"},
+        )
+        self.assertIn("C++", match["matched_skills"])
+        self.assertTrue(match["matched_roles"])
+        self.assertGreaterEqual(match["score"], 70)
+
+    def test_profile_save_analyzes_cv_and_updates_recommended_roles(self):
+        with get_db() as c:
+            previous_profile = dict(c.execute("SELECT * FROM profile WHERE id=1").fetchone())
+
+        payload = {
+            "name": "CV Analysis Test",
+            "citizenship": "Test",
+            "residence": "Remote",
+            "degree": "Computer Engineering",
+            "skills": "Manual Skills",
+            "target_roles": "Manual Role",
+            "cv_text": (
+                "Graduate Embedded Systems Engineer with C++, Python, firmware, "
+                "microcontroller and hardware interfacing experience."
+            ),
+        }
+        try:
+            with patch("app.main.refresh_daily_selection_if_due", new_callable=AsyncMock):
+                response = self.client.post("/profile", data=payload, follow_redirects=False)
+            self.assertEqual(response.status_code, 303)
+
+            with get_db() as c:
+                updated = c.execute(
+                    "SELECT skills, target_roles, cv_analysis FROM profile WHERE id=1"
+                ).fetchone()
+                analysis = json.loads(updated["cv_analysis"])
+            self.assertIn("Junior Embedded Systems Engineer", updated["target_roles"])
+            self.assertIn("Embedded Systems", updated["skills"])
+            self.assertEqual(analysis["roles"], updated["target_roles"].split(", "))
+        finally:
+            with get_db() as c:
+                c.execute(
+                    """UPDATE profile
+                       SET name=?, citizenship=?, residence=?, degree=?, skills=?, target_roles=?,
+                           cv_text=?, cv_analysis=?, updated_at=?
+                       WHERE id=1""",
+                    (
+                        previous_profile["name"], previous_profile["citizenship"],
+                        previous_profile["residence"], previous_profile["degree"],
+                        previous_profile["skills"], previous_profile["target_roles"],
+                        previous_profile["cv_text"], previous_profile.get("cv_analysis"),
+                        previous_profile["updated_at"],
+                    ),
+                )
+
     def test_supreme_jury_deliberation(self):
         profile = {
             "skills": "Python, C++, Java, Flutter",
@@ -125,7 +217,8 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 "company": "Top Global Corp",
                 "location": "London, UK",
                 "description": "Python, C++, distributed architecture. Complete visa sponsorship and relocation package.",
-                "url": "https://example.com/job_a"
+                "url": "https://example.com/job_a",
+                "liveness_status": "live"
             },
             {
                 "id": "job_b",
@@ -133,7 +226,8 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 "company": "Old Corp",
                 "location": "Berlin, Germany",
                 "description": "10+ years experience required. Must already have right to work, no sponsorship.",
-                "url": "https://example.com/job_b"
+                "url": "https://example.com/job_b",
+                "liveness_status": "live"
             }
         ]
 
@@ -161,7 +255,43 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("title", first)
         self.assertIn("company", first)
         self.assertIn("url", first)
-        self.assertEqual(first["liveness_status"], "live")
+        self.assertEqual(first["liveness_status"], "unverified")
+
+    def test_listing_check_detects_404_and_closed_role(self):
+        async def verify(url, status_code, body):
+            async def handler(request):
+                return httpx.Response(status_code, text=body)
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                return await BaseWorker().check_liveness(client, url)
+
+        self.assertEqual(
+            asyncio.run(verify("https://example.com/missing", 404, "")),
+            "expired"
+        )
+        self.assertEqual(
+            asyncio.run(verify("https://example.com/closed", 200, "This job is no longer available")),
+            "unavailable"
+        )
+
+    def test_jury_excludes_unverified_listing_from_daily_picks(self):
+        profile = {"skills": "Python, C++", "target_roles": "Junior Software Engineer"}
+        jobs = [{
+            "id": "unverified-job",
+            "title": "Graduate Software Engineer",
+            "company": "Example Co",
+            "location": "Remote",
+            "url": "https://example.com/job",
+            "description": "Python and C++ engineering role with visa sponsorship and relocation",
+            "liveness_status": "unverified"
+        }]
+
+        session = SupremeJuryAgent().run_full_session(jobs, profile)
+
+        result = session["jobs"][0]
+        self.assertEqual(result["is_daily_pick"], 0)
+        self.assertIn("AVAILABILITY UNVERIFIED", result["verdict_status"])
+        self.assertTrue(any(arg["type"] == "availability_check" for arg in result["arguments"]))
 
     def test_profile_save_and_re_debate(self):
         payload = {

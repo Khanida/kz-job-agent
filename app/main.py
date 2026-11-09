@@ -7,12 +7,16 @@ from typing import Optional, Tuple
 import sqlite3, os, json, re, hashlib, html
 import asyncio
 import logging
+import io
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
 from app.agents.orchestrator import run_jury_deliberation_workflow, run_discovery_workers
 from app.agents.jury import SupremeJuryAgent
 from app.agents.learner import record_interaction, compute_learned_boost, get_training_profile, init_learner_db
+from app.agents.cv_analyzer import analyze_cv, get_cv_analysis
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(APP_DIR.parent / "jobs.db"))
@@ -46,13 +50,14 @@ def init_db():
           url TEXT, source TEXT, description TEXT, visa_evidence TEXT,
           housing_evidence TEXT, score INTEGER DEFAULT 0, jury_score INTEGER DEFAULT 0,
           is_daily_pick INTEGER DEFAULT 0, advocate_agent TEXT, jury_verdict TEXT,
-          liveness_status TEXT DEFAULT 'live', posted_date TEXT DEFAULT 'Recently posted',
+          liveness_status TEXT DEFAULT 'unverified', liveness_checked_at TEXT,
+          posted_date TEXT DEFAULT 'Recently posted',
           status TEXT DEFAULT 'new', created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS profile (
           id INTEGER PRIMARY KEY CHECK(id=1), name TEXT, citizenship TEXT,
           residence TEXT, degree TEXT, skills TEXT, target_roles TEXT,
-          cv_text TEXT, cv_filename TEXT, cv_uploaded_at TEXT, updated_at TEXT
+          cv_text TEXT, cv_filename TEXT, cv_uploaded_at TEXT, cv_analysis TEXT, updated_at TEXT
         );
         CREATE TABLE IF NOT EXISTS applications (
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, status TEXT,
@@ -78,7 +83,8 @@ def init_db():
             ("is_daily_pick", "INTEGER DEFAULT 0"),
             ("advocate_agent", "TEXT"),
             ("jury_verdict", "TEXT"),
-            ("liveness_status", "TEXT DEFAULT 'live'"),
+            ("liveness_status", "TEXT DEFAULT 'unverified'"),
+            ("liveness_checked_at", "TEXT"),
             ("posted_date", "TEXT DEFAULT 'Recently posted'")
         ]:
             try:
@@ -88,7 +94,8 @@ def init_db():
 
         for col, col_def in [
             ("cv_filename", "TEXT"),
-            ("cv_uploaded_at", "TEXT")
+            ("cv_uploaded_at", "TEXT"),
+            ("cv_analysis", "TEXT")
         ]:
             try:
                 c.execute(f"ALTER TABLE profile ADD COLUMN {col} {col_def}")
@@ -103,6 +110,20 @@ def init_db():
           'Python, C++, Java, Flutter, Firebase, HTML, CSS, JavaScript, QA, Embedded Systems, Graphic Design',
           'Graduate Engineer, Junior Software Engineer, QA Engineer, IT Support Engineer, Embedded Systems Engineer, Technology Analyst',
           '',?)""", (datetime.now(timezone.utc).isoformat(),))
+
+        profile_row = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        if profile_row and profile_row["cv_text"] and not profile_row["cv_analysis"]:
+            cv_analysis = analyze_cv(profile_row["cv_text"])
+            c.execute(
+                """UPDATE profile
+                   SET cv_analysis=?, target_roles=?, skills=?
+                   WHERE id=1""",
+                (
+                    json.dumps(cv_analysis),
+                    ", ".join(cv_analysis["roles"]),
+                    ", ".join(cv_analysis["skills"]) or profile_row["skills"],
+                ),
+            )
         
         init_learner_db(c)
 
@@ -115,7 +136,14 @@ async def refresh_daily_selection_if_due(force: bool = False):
                 "SELECT session_date, top_picks_count FROM deliberations ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
             if not force and latest and latest["session_date"] == today:
-                return {"skipped": True, "crowned_count": latest["top_picks_count"] or 0}
+                unchecked_jobs = c.execute(
+                    """SELECT COUNT(*) FROM jobs
+                       WHERE status != 'dismissed'
+                       AND (liveness_checked_at IS NULL OR substr(liveness_checked_at, 1, 10) != ?)""",
+                    (today,),
+                ).fetchone()[0]
+                if unchecked_jobs == 0:
+                    return {"skipped": True, "crowned_count": latest["top_picks_count"] or 0}
 
             p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
             return await run_jury_deliberation_workflow(c, dict(p))
@@ -184,7 +212,7 @@ def extract_text_from_file(filename: str, content: bytes) -> str:
         return content.decode("utf-8", errors="ignore")
     elif ext == ".pdf":
         try:
-            import pypdf, io
+            import pypdf
             reader = pypdf.PdfReader(io.BytesIO(content))
             texts = []
             for idx, page in enumerate(reader.pages):
@@ -194,6 +222,18 @@ def extract_text_from_file(filename: str, content: bytes) -> str:
             return "\n".join(texts).strip()
         except Exception as e:
             return f"Error extracting PDF text: {str(e)}"
+    elif ext == ".docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                document = ET.fromstring(archive.read("word/document.xml"))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            return " ".join(
+                node.text for node in document.iter(f"{namespace}t") if node.text
+            ).strip()
+        except (KeyError, OSError, ET.ParseError, zipfile.BadZipFile) as e:
+            return f"Error extracting DOCX text: {str(e)}"
+    elif ext == ".doc":
+        return "Error extracting DOC text: legacy .doc files are not supported. Convert to PDF, DOCX, TXT, or Markdown."
     else:
         # Default fallback attempt to decode as UTF-8
         try:
@@ -203,6 +243,30 @@ def extract_text_from_file(filename: str, content: bytes) -> str:
 
 def esc(v):
     return html.escape(str(v) if v is not None else "")
+
+
+def liveness_badge(status):
+    if status == "live":
+        return "<span class='pill pill-live'>🟢 Posting page reachable</span>"
+    if status == "expired":
+        return "<span class='pill pill-expired'>🔴 Posting link returned 404/410</span>"
+    if status == "unavailable":
+        return "<span class='pill pill-expired'>🔴 Role appears closed</span>"
+    return "<span class='pill pill-unverified'>🟡 Availability unverified</span>"
+
+
+def posting_link(job_id, status):
+    if status in ("expired", "unavailable"):
+        label = "Posting link unavailable" if status == "expired" else "Role appears closed"
+        return f"<span class='posting-unavailable'>{label}</span>"
+    if status == "live":
+        label = "Apply / View posting ↗"
+    else:
+        label = "Check posting (availability unverified) ↗"
+    return (
+        f"<a class='apply-link' target='_blank' rel='noopener noreferrer' "
+        f"href='/track/click/{esc(job_id)}'>{label}</a>"
+    )
 
 def layout(body, active_nav="dashboard"):
     nav_links = [
@@ -388,6 +452,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             dp_score = dp["jury_score"] or dp["score"] or 0
             dp_verdict = esc(dp["jury_verdict"] or "Approved by Jury")
             dp_status = dp["status"] or "new"
+            dp_liveness = dp["liveness_status"] or "unverified"
 
             action_btn = (
                 f"<span class='pill pill-amber'>★ Shortlisted</span>" if dp_status == "shortlisted" else
@@ -410,12 +475,13 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <p class='company-loc'>{dp_company} · {dp_location}</p>
                 <div style='font-size:12px; color:#5a6857; margin-bottom:14px;'>
                   <b>Advocate:</b> {dp_advocate}<br>
-                  <b>Recruitment:</b> <span style='color:#1f642a; font-weight:600;'>🟢 Live & Recruiting</span> ({esc(dp['posted_date'] or 'Recent')})
+                  <b>Posting check:</b> {liveness_badge(dp_liveness)}<br>
+                  <b>Listed:</b> {esc(dp['posted_date'] or 'Recent')}
                 </div>
               </div>
               <div class='job-footer'>
                 <div class='daily-card-links'>
-                  <a class='apply-link' target='_blank' rel='noopener noreferrer' href='/track/click/{dp_id}'>Apply / View posting ↗</a>
+                  {posting_link(dp_id, dp_liveness)}
                   <a href='/jury#{dp_id}' style='font-size:12px; color:#966100; font-weight:700;'>Read Debate & Verdict →</a>
                 </div>
                 <div class='job-actions'>
@@ -448,11 +514,11 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         j_company = esc(j['company'])
         j_location = esc(j['location'] or "Global / Remote")
         j_source = esc(j['source'])
-        j_url = esc(j['url'])
         j_score = j['jury_score'] or j['score'] or 0
         j_status = j['status'] or "new"
         j_advocate = esc(j['advocate_agent'] or "")
         j_posted = esc(j['posted_date'] or "Recently posted")
+        j_liveness = j["liveness_status"] or "unverified"
 
         visa_txt = esc(j['visa_evidence'] or 'Not verified')
         housing_txt = esc(j['housing_evidence'] or 'Not verified')
@@ -516,7 +582,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             <div class='job-header'>
               <div class='pills'>
                 <span class='pill'>{j_source}</span>
-                <span class='pill pill-live'>🟢 Live</span>
+                {liveness_badge(j_liveness)}
                 {status_pill}
                 {learned_pill}
               </div>
@@ -531,7 +597,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             {f"<div style='margin-bottom:12px; font-size:12px;'><b>Advocate:</b> {advocate_badge}</div>" if advocate_badge else ""}
           </div>
           <div class='job-footer'>
-            <a class='apply-link' target='_blank' rel='noopener noreferrer' href='/track/click/{j_id}'>Apply / View posting ↗</a>
+            {posting_link(j_id, j_liveness)}
             <div class='job-actions'>
               {action_buttons}
             </div>
@@ -700,13 +766,13 @@ def jury_room(msg: str = ""):
         j_title = esc(j["title"])
         j_company = esc(j["company"])
         j_location = esc(j["location"] or "Global / Remote")
-        j_url = esc(j["url"])
         j_score = j["jury_score"] or j["score"] or 0
         j_daily = j["is_daily_pick"] == 1
         j_verdict = esc(j["jury_verdict"] or j["final_verdict"] or "Pending Deliberation")
         j_rec = esc(j["final_rec"] or "Review application scope.")
         j_advocate = esc(j["advocate_agent"] or "Sub-Agent Consensus")
         j_status = j["status"] or "new"
+        j_liveness = j["liveness_status"] or "unverified"
 
         # Debate feed
         debate_speeches = []
@@ -718,7 +784,13 @@ def jury_room(msg: str = ""):
                 arg_type = esc(arg["argument_type"])
                 statement = esc(arg["statement"])
                 
-                avatar = "💻" if "Software" in agent_name else ("🎯" if "Quality" in agent_name else ("🌍" if "Visa" in agent_name else "⚖️"))
+                avatar = (
+                    "🔎" if "Availability" in agent_name else
+                    ("📄" if "CV & Target Role" in agent_name else
+                    ("💻" if "Software" in agent_name else
+                     ("🎯" if "Quality" in agent_name else
+                      ("🌍" if "Visa" in agent_name else "⚖️"))))
+                )
                 debate_speeches.append(f"""
                 <div class='debate-speech'>
                   <div class='debate-avatar'>{avatar}</div>
@@ -753,7 +825,7 @@ def jury_room(msg: str = ""):
             <div>
               <div class='pills' style='margin-bottom:6px;'>
                 {crown_badge}
-                <span class='pill pill-live'>🟢 Live & Recruiting</span>
+                {liveness_badge(j_liveness)}
                 <span class='pill' style='background:#f3f1e9;'>Advocate: {j_advocate}</span>
               </div>
               <h3 style='margin:0 0 4px; font-size:18px;'>{j_title}</h3>
@@ -781,7 +853,7 @@ def jury_room(msg: str = ""):
           </div>
 
           <div class='job-footer' style='margin-top:16px;'>
-            <a target='_blank' rel='noopener noreferrer' href='{j_url}' style='font-size:13px; font-weight:700;'>View Live Official Vacancy ↗</a>
+            {posting_link(jid, j_liveness)}
             <div class='job-actions'>
               {action_btn}
             </div>
@@ -884,6 +956,17 @@ def profile_page(msg: str = ""):
             init_db()
             p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
     
+    profile_data = dict(p)
+    cv_analysis = get_cv_analysis(profile_data)
+    analysis_skills = cv_analysis.get("skills", [])
+    analysis_roles = cv_analysis.get("roles", [])
+    analysis_skills_html = " ".join(
+        f"<span class='pill'>{esc(skill)}</span>" for skill in analysis_skills
+    ) or "<span class='muted'>No CV skills detected yet.</span>"
+    analysis_roles_html = " ".join(
+        f"<span class='pill pill-amber'>{esc(role)}</span>" for role in analysis_roles
+    ) or "<span class='muted'>Add CV details to generate role recommendations.</span>"
+
     cv_filename = p["cv_filename"] if "cv_filename" in p.keys() and p["cv_filename"] else ""
     cv_uploaded_at = p["cv_uploaded_at"] if "cv_uploaded_at" in p.keys() and p["cv_uploaded_at"] else ""
 
@@ -908,18 +991,33 @@ def profile_page(msg: str = ""):
       </div>
     </div>
     <p class='muted'>All Sub-Agents (Software, QA, Visa) reference these criteria during worker filtering, CV matching, and court cross-examination.</p>
+
+    <section class='cv-analysis panel' aria-labelledby='cv-analysis-heading'>
+      <p class='eyebrow'>CV-BASED MATCHING</p>
+      <h2 id='cv-analysis-heading'>Your CV analysis</h2>
+      <p>{esc(cv_analysis.get('summary', 'Add CV details to begin analysis.'))}</p>
+      <div class='cv-analysis-group'>
+        <strong>Detected skills</strong>
+        <div class='pills'>{analysis_skills_html}</div>
+      </div>
+      <div class='cv-analysis-group'>
+        <strong>Recommended target roles</strong>
+        <div class='pills'>{analysis_roles_html}</div>
+      </div>
+      <p class='muted' style='margin-bottom:0;'>Recommendations are generated from CV text, editable below, and used by the Jury when ranking daily jobs.</p>
+    </section>
     
     <form class='panel' method='post' action='/profile' enctype='multipart/form-data'>
       <div class='cv-upload-zone'>
         <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>
           <div>
             <label style='margin:0; font-size:15px; font-weight:750;'>Upload Updated CV / Resume</label>
-            <p class='muted' style='margin:4px 0 0; font-size:12px;'>Supported formats: <b>PDF</b>, <b>TXT</b>, <b>Markdown</b> (max 10MB). Text will be extracted automatically into your profile summary below.</p>
+            <p class='muted' style='margin:4px 0 0; font-size:12px;'>Supported formats: <b>PDF</b>, <b>DOCX</b>, <b>TXT</b>, <b>Markdown</b> (max 10MB). Text will be extracted and used to suggest skills and target roles.</p>
           </div>
           {current_cv_badge}
         </div>
         <div style='margin-top:14px;'>
-          <input type='file' name='cv_file' accept='.pdf,.txt,.md,.doc,.docx' class='file-input'>
+          <input type='file' name='cv_file' accept='.pdf,.txt,.md,.docx' class='file-input'>
         </div>
       </div>
 
@@ -941,6 +1039,7 @@ def profile_page(msg: str = ""):
         <textarea name='skills' rows='3'>{esc(p['skills'])}</textarea>
       </label>
       <label>Target Roles (comma-separated)
+        <small class='muted'>Automatically suggested when CV text changes; you can edit these.</small>
         <textarea name='target_roles' rows='3'>{esc(p['target_roles'])}</textarea>
       </label>
       <label>CV / Resume Summary Text
@@ -981,24 +1080,50 @@ async def save_profile(
             extracted_text = extract_text_from_file(clean_name, file_bytes)
             uploaded_filename = clean_name
 
-            # If user uploaded a new CV, automatically populate cv_text with extracted content
-            if extracted_text and (not cv_text.strip() or len(extracted_text) > 30):
+            if extracted_text and not extracted_text.startswith("Error extracting"):
                 cv_text = extracted_text
 
     with get_db() as c:
+        previous_profile = c.execute(
+            "SELECT cv_text, cv_analysis FROM profile WHERE id=1"
+        ).fetchone()
+        cv_changed = cv_text.strip() != (previous_profile["cv_text"] or "").strip()
+        cv_analysis_json = previous_profile["cv_analysis"]
+        if cv_changed:
+            cv_analysis = analyze_cv(cv_text)
+            cv_analysis_json = json.dumps(cv_analysis)
+            if cv_text.strip():
+                target_roles = ", ".join(cv_analysis["roles"])
+                if cv_analysis["skills"]:
+                    skills = ", ".join(cv_analysis["skills"])
+
         if uploaded_filename:
-            c.execute("""UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
-                         target_roles=?, cv_text=?, cv_filename=?, cv_uploaded_at=?, updated_at=? WHERE id=1""",
-                      (name, citizenship, residence, degree, skills, target_roles, cv_text, uploaded_filename, now_iso, now_iso))
+            c.execute(
+                """UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
+                   target_roles=?, cv_text=?, cv_filename=?, cv_uploaded_at=?, cv_analysis=?, updated_at=?
+                   WHERE id=1""",
+                (
+                    name, citizenship, residence, degree, skills, target_roles, cv_text,
+                    uploaded_filename, now_iso, cv_analysis_json, now_iso,
+                ),
+            )
         else:
-            c.execute("""UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
-                         target_roles=?, cv_text=?, updated_at=? WHERE id=1""",
-                      (name, citizenship, residence, degree, skills, target_roles, cv_text, now_iso))
+            c.execute(
+                """UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
+                   target_roles=?, cv_text=?, cv_analysis=?, updated_at=? WHERE id=1""",
+                (
+                    name, citizenship, residence, degree, skills, target_roles, cv_text,
+                    cv_analysis_json, now_iso,
+                ),
+            )
         
     await refresh_daily_selection_if_due(force=True)
 
-    upload_msg = f"CV '{uploaded_filename}' uploaded and parsed! " if uploaded_filename else ""
-    msg = f"{upload_msg}Profile saved! Supreme Jury re-convened and updated the daily roster."
+    upload_msg = f"CV '{uploaded_filename}' uploaded and analyzed! " if uploaded_filename else ""
+    if cv_file and cv_file.filename and extracted_text.startswith("Error extracting"):
+        upload_msg = f"CV '{uploaded_filename}' uploaded, but text extraction failed: {extracted_text}. "
+    role_msg = "CV analysis generated target-role recommendations. " if cv_changed and cv_text.strip() else ""
+    msg = f"{upload_msg}{role_msg}Profile saved! Supreme Jury re-convened and updated the daily roster."
     return RedirectResponse("/profile?msg=" + quote_plus(msg), status_code=303)
 
 @app.get("/profile/cv/download")

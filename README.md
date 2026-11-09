@@ -25,6 +25,7 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Jury Room UI** (`/jury`): Interactive court viewer showing live agent speeches, cross-examination challenges, and the Supreme Jury's verdicts.
 - **Daily Selection Shelf**: Highlights up to five of the day's winning roles on the main dashboard.
 - **Daily refresh**: The app reruns the worker, Sub-Agent, and Jury workflow at midnight UTC and catches up on startup if the service was offline. Use **Refresh Today’s Top 5** on the dashboard to run it manually.
+- **Posting availability debate**: Each refresh checks the job page, records whether it is reachable, closed, expired, or unverified, and adds that evidence to the Jury debate. Only reachable postings can enter the daily top five; expired and unverified links are not presented as confirmed openings.
 - **Animated workflow**: The dashboard illustrates workers collecting job files, Sub-Agents debating, and the Jury ranking the daily top five whenever the page loads.
 - **Live Liveness & Recency Indicators**: Real-time tags (`🟢 Live on Website`, `📅 Recently posted`).
 - **Pipeline Workflow**: Status transitions (`New`, `Shortlisted`, `Applied`, `Dismissed`) logged in SQLite.

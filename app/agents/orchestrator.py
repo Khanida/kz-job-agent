@@ -2,8 +2,9 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 import sqlite3
+import httpx
 
-from app.agents.workers import ArbeitnowScout, RemotiveScout, CuratedEmployerScout
+from app.agents.workers import ArbeitnowScout, RemotiveScout, CuratedEmployerScout, BaseWorker, HEADERS
 from app.agents.jury import SupremeJuryAgent
 from app.agents.learner import compute_learned_boost, init_learner_db
 
@@ -29,6 +30,26 @@ async def run_discovery_workers() -> List[Dict[str, Any]]:
                     all_jobs.append(job)
 
     return all_jobs
+
+
+async def verify_listing_availability(jobs: List[Dict[str, Any]]) -> None:
+    """Verify every candidate posting URL; uncertain responses are never treated as live."""
+    verifier = BaseWorker()
+    semaphore = asyncio.Semaphore(12)
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(8.0, connect=5.0),
+        follow_redirects=True,
+        headers={**HEADERS, "Accept": "text/html,application/xhtml+xml"},
+    ) as client:
+        async def verify(job: Dict[str, Any]) -> None:
+            async with semaphore:
+                job["liveness_status"] = await verifier.check_liveness(
+                    client, job.get("url", "")
+                )
+                job["liveness_checked_at"] = datetime.now(timezone.utc).isoformat()
+
+        await asyncio.gather(*(verify(job) for job in jobs))
+
 
 async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -67,6 +88,8 @@ async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: D
         if u not in seen_urls:
             seen_urls.add(u)
             candidates_pool.append(row_dict)
+
+    await verify_listing_availability(candidates_pool)
 
     # 2. Compute Learned Behavioral Preferences for each candidate
     init_learner_db(db_conn)
@@ -125,8 +148,8 @@ async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: D
         db_conn.execute("""
         INSERT INTO jobs (id, title, company, location, url, source, description,
                           visa_evidence, housing_evidence, score, jury_score, is_daily_pick,
-                          advocate_agent, jury_verdict, liveness_status, posted_date, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          advocate_agent, jury_verdict, liveness_status, liveness_checked_at, posted_date, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           jury_score=excluded.jury_score,
           score=excluded.score,
@@ -136,12 +159,13 @@ async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: D
           visa_evidence=excluded.visa_evidence,
           housing_evidence=excluded.housing_evidence,
           liveness_status=excluded.liveness_status,
+          liveness_checked_at=excluded.liveness_checked_at,
           posted_date=excluded.posted_date
         """, (
             jid, job.get("title", ""), job.get("company", ""), job.get("location", ""),
             job.get("url", ""), job.get("source", "Scout"), job.get("description", ""),
             visa_ev, housing_ev, jury_score, jury_score, is_daily_pick,
-            advocate, verdict_status, liveness, posted, status, now_iso
+            advocate, verdict_status, liveness, job.get("liveness_checked_at"), posted, status, now_iso
         ))
 
         # Save arguments for this job

@@ -20,19 +20,43 @@ class BaseWorker:
         if not url:
             return "unverified"
         try:
-            # Quick HEAD request with fallback to GET for servers that reject HEAD
-            resp = await client.head(url, timeout=6.0, follow_redirects=True)
-            if resp.status_code == 405:
-                resp = await client.get(url, timeout=6.0, follow_redirects=True)
-            if resp.status_code < 400:
-                return "live"
-            elif resp.status_code in [404, 410]:
-                return "expired"
-            else:
-                return f"http_{resp.status_code}"
-        except Exception:
-            # If offline / network restricted, treat as unverified
-            return "live (cached)"
+            async with client.stream(
+                "GET", url, timeout=8.0, follow_redirects=True
+            ) as response:
+                if response.status_code in (404, 410):
+                    return "expired"
+                if response.status_code >= 400:
+                    return "unverified"
+
+                page_text = bytearray()
+                async for chunk in response.aiter_bytes():
+                    page_text.extend(chunk[: 128_000 - len(page_text)])
+                    if len(page_text) >= 128_000:
+                        break
+
+            page_text_lower = page_text.decode("utf-8", errors="ignore").lower()
+            unavailable_phrases = (
+                "this job is no longer available",
+                "job is no longer available",
+                "this position is no longer available",
+                "position is no longer available",
+                "position has been filled",
+                "this position has been filled",
+                "vacancy is closed",
+                "applications are closed",
+                "we are no longer accepting applications",
+                "job posting has expired",
+                "this job has expired",
+                "job not found",
+                "position not found",
+                "page not found",
+                "we couldn't find this job",
+            )
+            if any(phrase in page_text_lower for phrase in unavailable_phrases):
+                return "unavailable"
+            return "live"
+        except httpx.RequestError:
+            return "unverified"
 
 class ArbeitnowScout(BaseWorker):
     name = "Arbeitnow Worker Scout"
@@ -75,7 +99,7 @@ class ArbeitnowScout(BaseWorker):
                             "source": self.source_name,
                             "description": full_desc,
                             "posted_date": posted_str,
-                            "liveness_status": "live",
+                            "liveness_status": "unverified",
                             "worker_scout": self.name
                         })
         except Exception:
@@ -128,7 +152,7 @@ class RemotiveScout(BaseWorker):
                             "source": self.source_name,
                             "description": full_desc,
                             "posted_date": posted_str,
-                            "liveness_status": "live",
+                            "liveness_status": "unverified",
                             "worker_scout": self.name
                         })
         except Exception:
@@ -203,8 +227,7 @@ class CuratedEmployerScout(BaseWorker):
                 "source": self.source_name,
                 "description": j["description"],
                 "posted_date": j.get("posted_date", "Active"),
-                "liveness_status": "live",
+                "liveness_status": "unverified",
                 "worker_scout": self.name
             })
         return jobs
-
