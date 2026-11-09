@@ -23,7 +23,7 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 
 ## Features Included
 - **Jury Room UI** (`/jury`): Interactive court viewer showing live agent speeches, cross-examination challenges, and the Supreme Jury's verdicts.
-- **Daily Selection Shelf**: Highlights up to five of the day's winning roles on the main dashboard.
+- **Daily Selection Shelf**: Ranks up to five eligible live roles on the main dashboard. The Jury no longer requires a 50-point minimum; picks below that score are clearly labeled as lower-confidence best-available options. Unverified/expired listings, suspicious links, explicit work-authorization blockers, and stated candidate-fit exclusions remain out of the roster.
 - **Daily refresh**: The app reruns the worker, Sub-Agent, and Jury workflow at midnight UTC and catches up on startup if the service was offline. Use **Refresh Today’s Top 5** on the dashboard to run it manually.
 - **Posting availability debate**: Each refresh checks the job page, records whether it is reachable, closed, expired, or unverified, and adds that evidence to the Jury debate. Only reachable postings can enter the daily top five; expired and unverified links are not presented as confirmed openings.
 - **CV-based role matching**: Text extracted from PDF, DOCX, TXT, or Markdown CVs is analyzed locally for skills and likely target roles. The suggestions are editable in the profile and feed a dedicated CV-alignment score in every Jury decision and daily selection.

@@ -370,13 +370,19 @@ class SupremeJuryAgent:
             "matches_preferred_city": preference_check["matches_preferred_city"],
             "local_expat_status": preference_check["local_expat_status"],
             "local_expat_evidence": preference_check["local_expat_evidence"],
-            "is_selected": (
-                consensus_score >= 65
+            "eligible_for_daily_roster": (
+                listing_available
                 and not has_blocker
-                and listing_available
                 and authenticity_status != "suspicious"
                 and preference_check["eligible"]
-            )
+            ),
+            "is_selected": (
+                consensus_score >= 65
+                and listing_available
+                and not has_blocker
+                and authenticity_status != "suspicious"
+                and preference_check["eligible"]
+            ),
         }
 
     def run_full_session(self, candidate_jobs: List[Dict[str, Any]], profile: Dict[str, Any], max_daily_picks: int = 5, learned_boosts: Dict[str, Tuple[int, List[str]]] = None) -> Dict[str, Any]:
@@ -407,6 +413,8 @@ class SupremeJuryAgent:
             job_copy["matches_preferred_city"] = delib["matches_preferred_city"]
             job_copy["local_expat_status"] = delib["local_expat_status"]
             job_copy["local_expat_evidence"] = delib["local_expat_evidence"]
+            job_copy["eligible_for_daily_roster"] = delib["eligible_for_daily_roster"]
+            job_copy["is_selected"] = False
             job_copy["is_daily_pick"] = 0
             deliberated_jobs.append(job_copy)
 
@@ -416,20 +424,27 @@ class SupremeJuryAgent:
             reverse=True,
         )
 
-        # Crown the highest-ranked majority-approved live jobs, up to the daily limit.
+        # Fill the roster with the highest-ranked live jobs that pass hard eligibility checks.
         crowned_count = 0
         for j in deliberated_jobs:
             if (
                 crowned_count < max_daily_picks
-                and j["jury_score"] >= 50
-                and j["verdict_status"] in (
-                    "UNANIMOUS JURY APPROVAL — DAILY ROSTER",
-                    "APPROVED BY MAJORITY VOTE",
-                )
-                and j.get("liveness_status") == "live"
-                and j.get("authenticity_status", "unverified") != "suspicious"
+                and j["eligible_for_daily_roster"]
             ):
                 j["is_daily_pick"] = 1
+                j["is_selected"] = True
+                if j["jury_score"] < 50:
+                    j["verdict_status"] = "TOP 5 PICK — LOWER MATCH CONFIDENCE"
+                    j["jury_summary"] = (
+                        "Selected as one of the best currently available eligible roles, "
+                        f"although its match score is {j['jury_score']}/100. Review the requirements "
+                        "and confirm any unverified details before applying."
+                    )
+                    j["jury_recommendation"] = (
+                        "This is a best-available shortlist pick, not a strong match endorsement. "
+                        "Check the job requirements and confirm any unverified work-authorization, "
+                        "relocation, or accommodation details with the employer."
+                    )
                 crowned_count += 1
 
         session_summary = (

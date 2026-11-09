@@ -435,6 +435,61 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertFalse(results_by_id["other-city-qualified"]["matches_preferred_city"])
         self.assertEqual(results_by_id["other-city-qualified"]["is_daily_pick"], 1)
 
+    def test_jury_fills_top_five_with_best_eligible_live_jobs_below_old_score_cutoff(self):
+        profile = {
+            "skills": "Python",
+            "target_roles": "Junior Software Engineer",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+        }
+        jobs = [
+            {
+                "id": f"eligible-{index}",
+                "title": "Junior Software Engineer",
+                "company": f"Employer {index}",
+                "location": "London, UK",
+                "description": "Entry-level Python engineering role with training.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            }
+            for index in range(6)
+        ]
+        jobs.extend([
+            {
+                "id": "unverified-listing",
+                "title": "Junior Software Engineer",
+                "company": "Unverified Employer",
+                "location": "London, UK",
+                "description": "Entry-level Python engineering role.",
+                "liveness_status": "unverified",
+                "authenticity_status": "likely_official",
+            },
+            {
+                "id": "excluded-senior-role",
+                "title": "Senior Software Engineer",
+                "company": "Senior Employer",
+                "location": "London, UK",
+                "description": "Python engineering role.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+        ])
+
+        result = SupremeJuryAgent().run_full_session(jobs, profile)
+        results_by_id = {job["id"]: job for job in result["jobs"]}
+        picks = [job for job in result["jobs"] if job["is_daily_pick"]]
+
+        self.assertEqual(result["crowned_count"], 5)
+        self.assertEqual(len(picks), 5)
+        self.assertTrue(all(job["jury_score"] < 50 for job in picks))
+        self.assertTrue(all(job["is_selected"] for job in picks))
+        self.assertEqual(
+            results_by_id["eligible-0"]["verdict_status"],
+            "TOP 5 PICK — LOWER MATCH CONFIDENCE",
+        )
+        self.assertEqual(results_by_id["unverified-listing"]["is_daily_pick"], 0)
+        self.assertEqual(results_by_id["excluded-senior-role"]["is_daily_pick"], 0)
+
     def test_jeddah_job_requires_expat_eligibility_evidence(self):
         profile = {
             "citizenship": "Pakistani",
@@ -674,6 +729,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             "matches_preferred_city": False,
             "local_expat_status": "not_applicable",
             "local_expat_evidence": "",
+            "eligible_for_daily_roster": True,
             "relocation_status": "unverified",
             "accommodation_status": "unverified",
             "relocation_evidence": "Not verified",
