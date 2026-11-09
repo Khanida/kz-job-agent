@@ -629,7 +629,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             <p class='company-loc'>{j_company} · {j_location} · <small>{j_posted}</small></p>
             <div class='evidence-box'>
               <div><b>Visa:</b> <span class='{visa_class}'>{visa_txt}</span></div>
-              <div><b>Housing:</b> <span class='{housing_class}'>{housing_txt}</span></div>
+              <div><b>Relocation &amp; accommodation:</b> <span class='{housing_class}'>{housing_txt}</span></div>
             </div>
             {f"<div style='margin-bottom:12px; font-size:12px;'><b>Advocate:</b> {advocate_badge}</div>" if advocate_badge else ""}
           </div>

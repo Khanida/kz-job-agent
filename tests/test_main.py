@@ -57,7 +57,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("The Jury's Daily Selection", response.text)
             self.assertIn("No jobs currently meet your Jury preferences", response.text)
-            self.assertIn("prioritizes Jeddah, Saudi Arabia", response.text)
+            self.assertIn("prioritizing Jeddah, Saudi Arabia but not limiting picks to it", response.text)
         finally:
             with get_db() as c:
                 c.executemany(
@@ -157,7 +157,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             "title": "Junior Software Engineer (Python)",
             "company": "Tech Innovations",
             "location": "London, UK",
-            "description": "Python, C++, microservices. Full visa sponsorship and relocation support provided."
+            "description": "Python, C++, microservices. Full visa sponsorship, relocation support, and accommodation provided."
         }
 
         sw_agent = SoftwareSystemsAgent()
@@ -170,6 +170,10 @@ class TestMultiAgentJobSystem(unittest.TestCase):
 
         visa_eval = visa_agent.evaluate_job(test_job, profile)
         self.assertTrue(visa_eval["has_visa"])
+        self.assertTrue(visa_eval["has_relocation"])
+        self.assertTrue(visa_eval["has_housing"])
+        self.assertEqual(visa_eval["relocation_status"], "supported")
+        self.assertEqual(visa_eval["accommodation_status"], "supported")
         self.assertGreaterEqual(visa_eval["score"], 60)
 
         qa_eval = qa_agent.evaluate_job(test_job, profile)
@@ -178,6 +182,55 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         # Cross-examination challenges
         challenge = visa_agent.challenge(test_job, sw_agent.name, profile)
         self.assertIn("Endorsement", challenge["stance"])
+
+    def test_jury_checks_relocation_and_accommodation_for_out_of_city_jobs(self):
+        job = {
+            "id": "out-of-city-mobility",
+            "title": "Junior Embedded Systems Engineer",
+            "company": "London Employer",
+            "location": "London, UK",
+            "description": (
+                "Entry-level Python and embedded systems role. "
+                "Relocation assistance and temporary accommodation provided."
+            ),
+            "liveness_status": "live",
+            "authenticity_status": "likely_official",
+        }
+        profile = {
+            "skills": "Python, Embedded Systems",
+            "target_roles": "Junior Embedded Systems Engineer",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+        }
+
+        result = SupremeJuryAgent().deliberate_job(job, profile)
+        mobility_argument = next(
+            argument for argument in result["arguments"]
+            if argument["type"] == "relocation_accommodation"
+        )
+
+        self.assertEqual(result["relocation_status"], "supported")
+        self.assertEqual(result["accommodation_status"], "supported")
+        self.assertIn("relocation assistance", mobility_argument["statement"])
+        self.assertIn("temporary accommodation", mobility_argument["statement"])
+
+        job["description"] = "Entry-level Python and embedded systems role."
+        unverified = SupremeJuryAgent().deliberate_job(job, profile)
+        mobility_argument = next(
+            argument for argument in unverified["arguments"]
+            if argument["type"] == "relocation_accommodation"
+        )
+        self.assertEqual(unverified["relocation_status"], "unverified")
+        self.assertEqual(unverified["accommodation_status"], "unverified")
+        self.assertIn("Missing details are unverified", mobility_argument["statement"])
+
+        job["description"] = (
+            "Entry-level Python and embedded systems role. "
+            "No relocation support; accommodation not provided."
+        )
+        not_offered = SupremeJuryAgent().deliberate_job(job, profile)
+        self.assertEqual(not_offered["relocation_status"], "not_offered")
+        self.assertEqual(not_offered["accommodation_status"], "not_offered")
 
     def test_cv_analysis_recommends_roles_and_matches_job(self):
         cv_text = (
@@ -621,6 +674,10 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             "matches_preferred_city": False,
             "local_expat_status": "not_applicable",
             "local_expat_evidence": "",
+            "relocation_status": "unverified",
+            "accommodation_status": "unverified",
+            "relocation_evidence": "Not verified",
+            "accommodation_evidence": "Not verified",
         }
         with patch.object(
             SupremeJuryAgent, "deliberate_job", return_value=majority_approval

@@ -150,13 +150,26 @@ class RelocationVisaAgent(BaseSubAgent):
     avatar = "🌍"
 
     VISA_KEYWORDS = [
-        "visa sponsorship", "sponsorship available", "work permit", "relocation support",
+        "visa sponsorship", "sponsorship available", "work permit",
         "visa support", "visa provided", "tier 2", "blue card", "skilled worker", "sponsorship"
     ]
-    HOUSING_KEYWORDS = [
-        "accommodation provided", "housing allowance", "relocation package", "temporary housing",
-        "relocation bonus", "relocation assistance", "flight allowance"
+    RELOCATION_KEYWORDS = [
+        "relocation support", "relocation assistance", "relocation package",
+        "relocation allowance", "relocation bonus", "moving assistance",
+        "moving allowance", "flight allowance",
     ]
+    HOUSING_KEYWORDS = [
+        "accommodation provided", "accommodation allowance", "temporary accommodation",
+        "housing provided", "housing allowance", "temporary housing",
+    ]
+    RELOCATION_BLOCKERS = (
+        "no relocation support", "no relocation assistance", "relocation support is not available",
+        "relocation assistance is not available", "relocation is not provided",
+    )
+    ACCOMMODATION_BLOCKERS = (
+        "no accommodation", "accommodation is not provided", "accommodation not provided",
+        "no housing", "housing is not provided", "housing not provided",
+    )
     BLOCKER_KEYWORDS = [
         "no sponsorship", "must have right to work", "must be an eu citizen",
         "eu passport required", "cannot sponsor", "no visa", "us citizen only"
@@ -167,18 +180,25 @@ class RelocationVisaAgent(BaseSubAgent):
         loc = job.get("location", "").lower()
 
         visa_hits = [k for k in self.VISA_KEYWORDS if k in text]
+        relocation_hits = [k for k in self.RELOCATION_KEYWORDS if k in text]
         housing_hits = [k for k in self.HOUSING_KEYWORDS if k in text]
         blockers = [k for k in self.BLOCKER_KEYWORDS if k in text]
+        relocation_blockers = [k for k in self.RELOCATION_BLOCKERS if k in text]
+        accommodation_blockers = [k for k in self.ACCOMMODATION_BLOCKERS if k in text]
 
         has_blocker = len(blockers) > 0
         has_visa = len(visa_hits) > 0
+        has_relocation = len(relocation_hits) > 0
         has_housing = len(housing_hits) > 0
         is_remote = any(term in loc or term in text for term in ["remote", "worldwide", "anywhere", "global"])
+        relocation_not_required = any(
+            term in loc for term in ["remote", "worldwide", "anywhere", "global"]
+        )
 
         score = 20
         if has_visa:
             score += 45
-        if has_housing:
+        if has_relocation or has_housing:
             score += 25
         if is_remote and not has_blocker:
             score += 20
@@ -189,7 +209,38 @@ class RelocationVisaAgent(BaseSubAgent):
 
         # Evidence texts
         visa_ev = ("Mentioned: " + ", ".join(visa_hits)) if has_visa else ("BLOCKED: " + ", ".join(blockers) if has_blocker else "Not verified")
-        housing_ev = ("Mentioned: " + ", ".join(housing_hits)) if has_housing else ("Remote / No relocation required" if is_remote else "Not verified")
+        if relocation_not_required:
+            relocation_status = "not_required"
+            accommodation_status = "not_required"
+        else:
+            relocation_status = (
+                "not_offered" if relocation_blockers
+                else "supported" if has_relocation
+                else "unverified"
+            )
+            accommodation_status = (
+                "not_offered" if accommodation_blockers
+                else "supported" if has_housing
+                else "unverified"
+            )
+
+        relocation_ev = (
+            "Not offered: " + ", ".join(relocation_blockers)
+            if relocation_blockers else
+            "Mentioned: " + ", ".join(relocation_hits)
+            if has_relocation else
+            "Not required for remote/worldwide location"
+            if relocation_not_required else "Not verified"
+        )
+        accommodation_ev = (
+            "Not offered: " + ", ".join(accommodation_blockers)
+            if accommodation_blockers else
+            "Mentioned: " + ", ".join(housing_hits)
+            if has_housing else
+            "Not required for remote/worldwide location"
+            if relocation_not_required else "Not verified"
+        )
+        housing_ev = f"Relocation: {relocation_ev}; Accommodation: {accommodation_ev}"
 
         concerns = []
         if has_blocker:
@@ -197,8 +248,18 @@ class RelocationVisaAgent(BaseSubAgent):
         elif not has_visa and not is_remote:
             concerns.append("No explicit visa sponsorship verified. High risk of candidate disqualification.")
 
-        if has_visa and has_housing:
-            pitch = f"Gold-standard international mobility package: Confirmed evidence for {', '.join(visa_hits)} and {', '.join(housing_hits)}."
+        if has_visa and has_relocation and has_housing:
+            pitch = (
+                f"Strong international mobility evidence: visa support ({', '.join(visa_hits)}), "
+                f"relocation ({', '.join(relocation_hits)}), and accommodation ({', '.join(housing_hits)})."
+            )
+        elif has_relocation or has_housing:
+            supported = []
+            if has_relocation:
+                supported.append("relocation: " + ", ".join(relocation_hits))
+            if has_housing:
+                supported.append("accommodation: " + ", ".join(housing_hits))
+            pitch = "Partial mobility evidence: " + "; ".join(supported) + ". Verify any missing support with the employer."
         elif has_visa:
             pitch = f"Verified international mobility: Explicit support for {', '.join(visa_hits)}."
         elif is_remote:
@@ -214,7 +275,12 @@ class RelocationVisaAgent(BaseSubAgent):
             "housing_evidence": housing_ev,
             "has_blocker": has_blocker,
             "has_visa": has_visa,
+            "has_relocation": has_relocation,
             "has_housing": has_housing,
+            "relocation_status": relocation_status,
+            "accommodation_status": accommodation_status,
+            "relocation_evidence": relocation_ev,
+            "accommodation_evidence": accommodation_ev,
             "is_preferred": (has_visa or is_remote) and not has_blocker
         }
 

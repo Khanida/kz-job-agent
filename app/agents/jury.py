@@ -172,6 +172,41 @@ class SupremeJuryAgent:
             "statement": location_statement,
             "score": 100 if preference_check["matches_preferred_city"] else 50,
         })
+        if (
+            preference_check["preferred_city"]
+            and not preference_check["matches_preferred_city"]
+        ):
+            mobility_status = (
+                "The role is remote/worldwide, so relocation and accommodation are not required."
+                if visa_eval["relocation_status"] == "not_required"
+                else (
+                    "For this out-of-city role, mobility evidence is: "
+                    f"{visa_eval['relocation_evidence']}; "
+                    f"{visa_eval['accommodation_evidence']}. "
+                    "Missing details are unverified, not confirmation that support is unavailable; "
+                    "confirm the package with the employer."
+                )
+            )
+            mobility_score = (
+                100 if visa_eval["relocation_status"] == "not_required"
+                else 80 if (
+                    visa_eval["relocation_status"] == "supported"
+                    and visa_eval["accommodation_status"] == "supported"
+                )
+                else 60 if (
+                    visa_eval["relocation_status"] == "supported"
+                    or visa_eval["accommodation_status"] == "supported"
+                )
+                else 30
+            )
+            arguments.append({
+                "agent_name": "Relocation & Accommodation Examiner",
+                "agent_role": "Out-of-City Mobility Support Review",
+                "avatar": "🏠",
+                "type": "relocation_accommodation",
+                "statement": mobility_status,
+                "score": mobility_score,
+            })
         if preference_check["local_expat_status"] == "evidence_found":
             expat_statement = preference_check["local_expat_evidence"]
             expat_score = 80
@@ -326,6 +361,10 @@ class SupremeJuryAgent:
             "advocate_agent": primary_advocate,
             "visa_evidence": visa_eval.get("visa_evidence", "Not verified"),
             "housing_evidence": visa_eval.get("housing_evidence", "Not verified"),
+            "relocation_status": visa_eval["relocation_status"],
+            "accommodation_status": visa_eval["accommodation_status"],
+            "relocation_evidence": visa_eval["relocation_evidence"],
+            "accommodation_evidence": visa_eval["accommodation_evidence"],
             "arguments": arguments,
             "preferred_city": preference_check["preferred_city"],
             "matches_preferred_city": preference_check["matches_preferred_city"],
@@ -359,6 +398,10 @@ class SupremeJuryAgent:
             job_copy["advocate_agent"] = delib["advocate_agent"]
             job_copy["visa_evidence"] = delib["visa_evidence"]
             job_copy["housing_evidence"] = delib["housing_evidence"]
+            job_copy["relocation_status"] = delib["relocation_status"]
+            job_copy["accommodation_status"] = delib["accommodation_status"]
+            job_copy["relocation_evidence"] = delib["relocation_evidence"]
+            job_copy["accommodation_evidence"] = delib["accommodation_evidence"]
             job_copy["arguments"] = delib["arguments"]
             job_copy["preferred_city"] = delib["preferred_city"]
             job_copy["matches_preferred_city"] = delib["matches_preferred_city"]
