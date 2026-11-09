@@ -347,6 +347,41 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         )
         self.assertIn("prioritize", location_argument["statement"].lower())
 
+    def test_jury_can_select_qualified_job_outside_preferred_city(self):
+        profile = {
+            "skills": "Python, Embedded Systems",
+            "target_roles": "Junior Embedded Systems Engineer",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+        }
+        jobs = [
+            {
+                "id": "local-unverified",
+                "title": "Graduate Embedded Systems Engineer",
+                "company": "Jeddah Co",
+                "location": "Jeddah, Saudi Arabia",
+                "description": "Entry-level Python and microcontroller engineering role.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+            {
+                "id": "other-city-qualified",
+                "title": "Graduate Embedded Systems Engineer",
+                "company": "Remote Co",
+                "location": "Remote",
+                "description": "Entry-level Python and microcontroller engineering role.",
+                "liveness_status": "live",
+                "authenticity_status": "likely_official",
+            },
+        ]
+
+        result = SupremeJuryAgent().run_full_session(jobs, profile)
+        results_by_id = {job["id"]: job for job in result["jobs"]}
+
+        self.assertEqual(results_by_id["local-unverified"]["is_daily_pick"], 0)
+        self.assertFalse(results_by_id["other-city-qualified"]["matches_preferred_city"])
+        self.assertEqual(results_by_id["other-city-qualified"]["is_daily_pick"], 1)
+
     def test_jeddah_job_requires_expat_eligibility_evidence(self):
         profile = {
             "citizenship": "Pakistani",

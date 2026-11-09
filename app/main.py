@@ -536,7 +536,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
           </div>
           <div class='empty-state'>
             <h3>No jobs currently meet your Jury preferences</h3>
-            <p>The Jury excludes senior and advanced-tier roles, Rust and backend-focused jobs, unavailable listings, and roles restricted to Saudi nationals. It prioritizes {esc(p['residence'] or 'your preferred city')} when a qualified live role is available; broaden your preferences in your <a href='/profile'>profile</a> or refresh after new postings arrive.</p>
+            <p>The Jury considers qualified jobs in all locations, prioritizing {esc(p['residence'] or 'your preferred city')} but not limiting picks to it. It excludes senior and advanced-tier roles, Rust and backend-focused jobs, unavailable listings, and roles restricted to Saudi nationals. Update your role preferences in your <a href='/profile'>profile</a> or refresh after new postings arrive.</p>
           </div>
         </section>
         """
@@ -1092,7 +1092,7 @@ def profile_page(msg: str = ""):
       </label>
       <div class='cv-analysis-group'>
         <strong>Job fit preferences used by the Jury</strong>
-        <small class='muted'>Your current city is prioritized first. For Jeddah jobs, the Jury requires posting evidence that Pakistani applicants are eligible (for example, “Pakistani applicants welcome”); generic visa or iqama language is not enough. This does not prove past hiring history.</small>
+        <small class='muted'>Your current city is a preference, not a location restriction: qualified jobs in other cities or remote roles can still be selected. For Jeddah jobs, the Jury requires posting evidence that Pakistani applicants are eligible (for example, “Pakistani applicants welcome”); generic visa or iqama language is not enough. This does not prove past hiring history.</small>
       </div>
       <label>Experience level
         <select name='experience_level'>
