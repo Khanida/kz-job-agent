@@ -43,9 +43,9 @@ async def verify_listing_availability(jobs: List[Dict[str, Any]]) -> None:
     ) as client:
         async def verify(job: Dict[str, Any]) -> None:
             async with semaphore:
-                job["liveness_status"] = await verifier.check_liveness(
-                    client, job.get("url", "")
-                )
+                job.update(await verifier.check_listing(
+                    client, job.get("url", ""), job.get("company", "")
+                ))
                 job["liveness_checked_at"] = datetime.now(timezone.utc).isoformat()
 
         await asyncio.gather(*(verify(job) for job in jobs))
@@ -141,6 +141,8 @@ async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: D
         visa_ev = job.get("visa_evidence", "Not verified")
         housing_ev = job.get("housing_evidence", "Not verified")
         liveness = job.get("liveness_status", "live")
+        authenticity = job.get("authenticity_status", "unverified")
+        authenticity_evidence = job.get("authenticity_evidence", "Not verified")
         posted = job.get("posted_date", "Recently posted")
         status = job.get("status", "new")
 
@@ -148,8 +150,9 @@ async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: D
         db_conn.execute("""
         INSERT INTO jobs (id, title, company, location, url, source, description,
                           visa_evidence, housing_evidence, score, jury_score, is_daily_pick,
-                          advocate_agent, jury_verdict, liveness_status, liveness_checked_at, posted_date, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          advocate_agent, jury_verdict, liveness_status, liveness_checked_at,
+                          authenticity_status, authenticity_evidence, posted_date, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           jury_score=excluded.jury_score,
           score=excluded.score,
@@ -160,12 +163,15 @@ async def run_jury_deliberation_workflow(db_conn: sqlite3.Connection, profile: D
           housing_evidence=excluded.housing_evidence,
           liveness_status=excluded.liveness_status,
           liveness_checked_at=excluded.liveness_checked_at,
+          authenticity_status=excluded.authenticity_status,
+          authenticity_evidence=excluded.authenticity_evidence,
           posted_date=excluded.posted_date
         """, (
             jid, job.get("title", ""), job.get("company", ""), job.get("location", ""),
             job.get("url", ""), job.get("source", "Scout"), job.get("description", ""),
             visa_ev, housing_ev, jury_score, jury_score, is_daily_pick,
-            advocate, verdict_status, liveness, job.get("liveness_checked_at"), posted, status, now_iso
+            advocate, verdict_status, liveness, job.get("liveness_checked_at"),
+            authenticity, authenticity_evidence, posted, status, now_iso
         ))
 
         # Save arguments for this job

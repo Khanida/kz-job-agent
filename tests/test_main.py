@@ -1,12 +1,14 @@
 import unittest
 import asyncio
 import json
+import sqlite3
 import httpx
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
-from app.main import app, get_db, esc
+from app.main import app, extract_text_from_file, get_db, esc
 from app.agents.cv_analyzer import analyze_cv, score_cv_match
 from app.agents.workers import BaseWorker, CuratedEmployerScout
+from app.agents.orchestrator import run_jury_deliberation_workflow
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
 from app.agents.jury import SupremeJuryAgent
 
@@ -159,6 +161,61 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("C++", match["matched_skills"])
         self.assertTrue(match["matched_roles"])
         self.assertGreaterEqual(match["score"], 70)
+        self.assertNotIn(
+            "Cybersecurity Analyst",
+            analyze_cv("Python developer with backend API experience.")["roles"],
+        )
+
+    def test_cv_match_influences_jury_ranking(self):
+        profile = {
+            "skills": "Flutter, Dart, Android, Firebase",
+            "target_roles": "Junior Mobile App Developer",
+            "cv_analysis": {
+                "skills": ["Flutter", "Dart", "Android", "Firebase"],
+                "roles": ["Junior Mobile App Developer"],
+            },
+        }
+        jobs = [
+            {
+                "id": "mobile-role",
+                "title": "Junior Mobile App Developer",
+                "company": "Mobile Co",
+                "location": "Remote",
+                "description": "Flutter, Dart, Android, Firebase development",
+                "liveness_status": "live",
+            },
+            {
+                "id": "qa-role",
+                "title": "QA Automation Engineer",
+                "company": "QA Co",
+                "location": "Remote",
+                "description": "Java, Selenium, test automation",
+                "liveness_status": "live",
+            },
+        ]
+
+        result = SupremeJuryAgent().run_full_session(jobs, profile)
+
+        self.assertEqual(result["jobs"][0]["id"], "mobile-role")
+        cv_argument = next(
+            arg for arg in result["jobs"][0]["arguments"] if arg["type"] == "cv_match"
+        )
+        self.assertIn("Flutter", cv_argument["statement"])
+
+    def test_docx_cv_text_extraction(self):
+        import io
+        import zipfile
+
+        document_xml = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            b'<w:body><w:p><w:r><w:t>Python engineer</w:t></w:r></w:p></w:body></w:document>'
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("word/document.xml", document_xml)
+
+        self.assertEqual(extract_text_from_file("resume.docx", buffer.getvalue()), "Python engineer")
 
     def test_profile_save_analyzes_cv_and_updates_recommended_roles(self):
         with get_db() as c:
@@ -273,6 +330,144 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             asyncio.run(verify("https://example.com/closed", 200, "This job is no longer available")),
             "unavailable"
         )
+
+    def test_listing_authenticity_uses_domain_signals_without_claiming_proof(self):
+        assessor = BaseWorker()
+
+        self.assertEqual(
+            assessor.assess_authenticity(
+                "https://jobs.example-company.com/opening", "Example Company"
+            )["status"],
+            "likely_official",
+        )
+        platform_result = assessor.assess_authenticity(
+            "https://boards.greenhouse.io/example", "Example Company"
+        )
+        self.assertEqual(platform_result["status"], "likely_official")
+        self.assertIn("confirm the employer", platform_result["evidence"])
+        self.assertEqual(
+            assessor.assess_authenticity(
+                "https://unknown-host.invalid/opening", "Example Company"
+            )["status"],
+            "unverified",
+        )
+        self.assertEqual(
+            assessor.assess_authenticity(
+                "http://example-company.com/opening", "Example Company"
+            )["status"],
+            "suspicious",
+        )
+
+    def test_listing_authenticity_checks_final_redirect_destination(self):
+        async def verify():
+            async def handler(request):
+                if request.url.path == "/redirect":
+                    return httpx.Response(
+                        302,
+                        headers={"Location": "https://jobs.example-company.com/careers"},
+                        request=request,
+                    )
+                return httpx.Response(200, text="Current opportunities", request=request)
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), follow_redirects=True
+            ) as client:
+                return await BaseWorker().check_listing(
+                    client, "https://short.example/redirect", "Example Company"
+                )
+
+        result = asyncio.run(verify())
+        self.assertEqual(result["liveness_status"], "live")
+        self.assertEqual(result["authenticity_status"], "likely_official")
+
+    def test_jury_rejects_suspicious_posting_destination(self):
+        job = {
+            "id": "suspicious-link",
+            "title": "Graduate Software Engineer",
+            "company": "Example Company",
+            "location": "Remote",
+            "url": "http://example-company.com/apply",
+            "description": "Python and C++ engineering role with visa sponsorship and relocation",
+            "liveness_status": "live",
+            "authenticity_status": "suspicious",
+            "authenticity_evidence": "The posting URL does not use a valid HTTPS destination.",
+        }
+
+        result = SupremeJuryAgent().run_full_session(
+            [job],
+            {"skills": "Python, C++", "target_roles": "Junior Software Engineer"},
+        )["jobs"][0]
+
+        self.assertEqual(result["is_daily_pick"], 0)
+        self.assertEqual(result["jury_score"], 0)
+        self.assertIn("SUSPICIOUS POSTING LINK", result["verdict_status"])
+        authenticity_argument = next(
+            arg for arg in result["arguments"] if arg["type"] == "authenticity_check"
+        )
+        self.assertIn("do not enter personal information", authenticity_argument["statement"])
+
+    def test_jury_workflow_persists_authenticity_evidence(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("""
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT,
+                url TEXT, source TEXT, description TEXT, visa_evidence TEXT,
+                housing_evidence TEXT, score INTEGER, jury_score INTEGER,
+                is_daily_pick INTEGER, advocate_agent TEXT, jury_verdict TEXT,
+                liveness_status TEXT, liveness_checked_at TEXT,
+                authenticity_status TEXT, authenticity_evidence TEXT,
+                posted_date TEXT, status TEXT, created_at TEXT
+            )
+        """)
+        job = {
+            "id": "authenticity-persistence-test",
+            "title": "Graduate Software Engineer",
+            "company": "Example Company",
+            "location": "Remote",
+            "url": "https://careers.example-company.com/jobs/123",
+            "source": "Test",
+            "description": "Python and C++ engineering role",
+            "status": "new",
+        }
+
+        async def mock_verification(jobs):
+            for candidate in jobs:
+                candidate.update({
+                    "liveness_status": "live",
+                    "authenticity_status": "likely_official",
+                    "authenticity_evidence": "Employer-name domain match.",
+                })
+
+        try:
+            with (
+                patch(
+                    "app.agents.orchestrator.run_discovery_workers",
+                    new=AsyncMock(return_value=[job]),
+                ),
+                patch(
+                    "app.agents.orchestrator.verify_listing_availability",
+                    new=AsyncMock(side_effect=mock_verification),
+                ),
+            ):
+                asyncio.run(run_jury_deliberation_workflow(
+                    connection,
+                    {"skills": "Python, C++", "target_roles": "Junior Software Engineer"},
+                ))
+
+            saved_job = connection.execute(
+                "SELECT authenticity_status, authenticity_evidence FROM jobs WHERE id=?",
+                (job["id"],),
+            ).fetchone()
+            self.assertEqual(saved_job["authenticity_status"], "likely_official")
+            self.assertEqual(saved_job["authenticity_evidence"], "Employer-name domain match.")
+            saved_argument = connection.execute(
+                "SELECT argument_type FROM agent_arguments WHERE job_id=? AND argument_type='authenticity_check'",
+                (job["id"],),
+            ).fetchone()
+            self.assertIsNotNone(saved_argument)
+        finally:
+            connection.close()
 
     def test_jury_excludes_unverified_listing_from_daily_picks(self):
         profile = {"skills": "Python, C++", "target_roles": "Junior Software Engineer"}

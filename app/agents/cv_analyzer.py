@@ -10,7 +10,7 @@ SKILL_PATTERNS = {
     "JavaScript": (r"\bjavascript\b", r"\bjs\b"),
     "TypeScript": (r"\btypescript\b",),
     "C#": (r"(?<!\w)c#(?!\w)", r"\bc-sharp\b"),
-    "C": (r"\bc\b",),
+    "C": (r"\bc\s+(?:programming|language)\b", r"\bc\s*/\s*c\+\+"),
     "SQL": (r"\bsql\b",),
     "HTML": (r"\bhtml\b",),
     "CSS": (r"\bcss\b",),
@@ -42,6 +42,7 @@ SKILL_PATTERNS = {
     "Project Management": (r"\bproject management\b", r"\bagile\b", r"\bscrum\b"),
     "UI / UX Design": (r"\bui/?ux\b", r"\buser experience\b", r"\bfigma\b"),
     "Graphic Design": (r"\bgraphic design\b", r"\badobe (?:photoshop|illustrator)\b"),
+    "Social Media Design": (r"\bsocial media design(?:s)?\b",),
     "Digital Marketing": (r"\bdigital marketing\b", r"\bseo\b", r"\bgoogle ads\b"),
     "Accounting": (r"\baccount(?:ing|antancy)\b", r"\bbookkeeping\b", r"\bquickbooks\b"),
     "Human Resources": (r"\bhuman resources\b", r"\brecruit(?:ing|ment)\b", r"\bpayroll\b"),
@@ -66,6 +67,8 @@ ROLE_EVIDENCE = {
     "Cybersecurity Analyst": ("Cybersecurity", "Linux", "Networking", "Python"),
     "Project Coordinator": ("Project Management", "Excel"),
     "UI/UX Designer": ("UI / UX Design", "Graphic Design"),
+    "Graphic Designer": ("Graphic Design", "Social Media Design"),
+    "Social Media Designer": ("Social Media Design", "Graphic Design"),
     "Digital Marketing Specialist": ("Digital Marketing", "Data Analysis", "Excel"),
     "Accountant": ("Accounting", "Excel"),
     "Human Resources Coordinator": ("Human Resources", "Excel"),
@@ -73,9 +76,28 @@ ROLE_EVIDENCE = {
     "Operations Analyst": ("Supply Chain", "Project Management", "Excel", "Data Analysis"),
     "Civil Engineer": ("Civil Engineering", "Project Management"),
     "Mechanical Engineer": ("Mechanical Engineering", "Project Management"),
-    "Electrical Engineer": ("Electrical Engineering", "Embedded Systems", "C++"),
+    "Electrical Engineer": ("Electrical Engineering",),
 }
 
+ROLE_CORE_SKILLS = {
+    "Embedded Systems Engineer": {"Embedded Systems"},
+    "QA Automation Engineer": {"QA / Testing", "Selenium", "Playwright"},
+    "IT Support Engineer": {"IT Support"},
+    "DevOps / Cloud Engineer": {"Docker", "Kubernetes", "AWS", "Azure"},
+    "Data Analyst": {"Data Analysis"},
+    "Cybersecurity Analyst": {"Cybersecurity"},
+    "Project Coordinator": {"Project Management"},
+    "UI/UX Designer": {"UI / UX Design"},
+    "Graphic Designer": {"Graphic Design"},
+    "Social Media Designer": {"Social Media Design"},
+    "Digital Marketing Specialist": {"Digital Marketing"},
+    "Accountant": {"Accounting"},
+    "Human Resources Coordinator": {"Human Resources"},
+    "Sales Representative": {"Sales"},
+    "Civil Engineer": {"Civil Engineering"},
+    "Mechanical Engineer": {"Mechanical Engineering"},
+    "Electrical Engineer": {"Electrical Engineering"},
+}
 
 def analyze_cv(cv_text: str) -> Dict[str, Any]:
     """Derive explainable skill and role recommendations from CV text without external services."""
@@ -89,26 +111,36 @@ def analyze_cv(cv_text: str) -> Dict[str, Any]:
     scored_roles = []
     for role, evidence in ROLE_EVIDENCE.items():
         matched = [skill for skill in evidence if skill in skills]
-        if matched:
+        core_skills = ROLE_CORE_SKILLS.get(role)
+        if matched and (
+            bool(core_skills.intersection(matched))
+            if core_skills
+            else len(matched) >= 2
+        ):
             scored_roles.append((role, len(matched), matched))
     scored_roles.sort(key=lambda result: (-result[1], result[0]))
 
+    senior_title = bool(re.search(
+        r"(?im)^\s*(?:senior|lead|principal|staff)\s+[\w/& -]{0,70}"
+        r"\b(?:engineer|developer|designer|manager|analyst|architect)\b",
+        text,
+    ))
     seniority = "unspecified"
     years = [
         int(match.group(1))
         for match in re.finditer(r"\b(\d{1,2})\+?\s+years?\b", lowered)
     ]
-    if any(term in lowered for term in ("senior", "lead engineer", "principal engineer")) or any(year >= 5 for year in years):
+    if senior_title:
         seniority = "experienced"
     elif any(term in lowered for term in ("graduate", "entry-level", "entry level", "junior", "intern", "student", "fresh graduate")) or any(year <= 2 for year in years):
         seniority = "early-career"
+    elif any(year >= 5 for year in years):
+        seniority = "experienced"
 
     roles = []
     for role, _, _ in scored_roles[:5]:
         if seniority == "early-career" and role not in ("Accountant", "Sales Representative"):
             role = f"Junior {role}"
-        elif seniority == "experienced" and role not in ("Accountant", "Sales Representative"):
-            role = f"Senior {role}"
         roles.append(role)
 
     if skills and roles:
@@ -156,9 +188,10 @@ def score_cv_match(job: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, An
     ]
 
     job_title = re.sub(r"[^a-z0-9+#]+", " ", (job.get("title") or "").lower()).strip()
-    target_roles = analysis.get("roles") or [
-        role.strip() for role in (profile.get("target_roles") or "").split(",") if role.strip()
-    ]
+    target_roles = list(dict.fromkeys(
+        list(analysis.get("roles", []))
+        + [role.strip() for role in (profile.get("target_roles") or "").split(",") if role.strip()]
+    ))
     role_matches = [
         role for role in target_roles
         if any(

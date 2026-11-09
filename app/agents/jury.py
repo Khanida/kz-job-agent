@@ -53,6 +53,34 @@ class SupremeJuryAgent:
             "score": 100 if liveness_status == "live" else 0
         })
 
+        authenticity_status = job.get("authenticity_status", "unverified")
+        authenticity_evidence = job.get(
+            "authenticity_evidence",
+            "The employer and posting domain could not be verified.",
+        )
+        if authenticity_status == "likely_official":
+            authenticity_statement = (
+                f"Positive domain signal: {authenticity_evidence} "
+                "A matching domain or recruiting platform does not prove that the employer or vacancy is genuine."
+            )
+        elif authenticity_status == "suspicious":
+            authenticity_statement = (
+                f"OBJECTION: {authenticity_evidence} The Jury rejects this link; do not enter personal information or apply through it."
+            )
+        else:
+            authenticity_statement = (
+                f"Authenticity remains unverified: {authenticity_evidence} "
+                "Check the employer's official careers page before sharing personal information."
+            )
+        arguments.append({
+            "agent_name": "Employer Authenticity Examiner",
+            "agent_role": "Employer Domain & Recruiting Platform Review",
+            "avatar": "🛡️",
+            "type": "authenticity_check",
+            "statement": authenticity_statement,
+            "score": 100 if authenticity_status == "likely_official" else (0 if authenticity_status == "suspicious" else 50),
+        })
+
         # Software Pitch
         arguments.append({
             "agent_name": self.software_agent.name,
@@ -130,7 +158,7 @@ class SupremeJuryAgent:
             + (cv_match["score"] * 0.25)
         )
 
-        if liveness_status in ("expired", "unavailable"):
+        if liveness_status in ("expired", "unavailable") or authenticity_status == "suspicious":
             consensus_score = 0
         elif has_blocker:
             consensus_score = min(base_score, 20)
@@ -159,6 +187,10 @@ class SupremeJuryAgent:
             verdict_status = "REJECTED BY JURY (ROLE NO LONGER AVAILABLE)"
             summary = "The posting page indicates that this role is closed, filled, expired, or no longer accepting applications."
             recommendation = "Do not apply. The role was excluded from today's apply roster."
+        elif authenticity_status == "suspicious":
+            verdict_status = "REJECTED BY JURY (SUSPICIOUS POSTING LINK)"
+            summary = "The Jury found a clear security red flag in the posting destination."
+            recommendation = "Do not apply through this link or enter personal information. Find the role through the employer's official careers page."
         elif not listing_available:
             verdict_status = "DEFERRED BY JURY (AVAILABILITY UNVERIFIED)"
             summary = "The Jury could not verify that the posting page is reachable and available."
@@ -210,7 +242,12 @@ class SupremeJuryAgent:
             "visa_evidence": visa_eval.get("visa_evidence", "Not verified"),
             "housing_evidence": visa_eval.get("housing_evidence", "Not verified"),
             "arguments": arguments,
-            "is_selected": consensus_score >= 65 and not has_blocker and listing_available
+            "is_selected": (
+                consensus_score >= 65
+                and not has_blocker
+                and listing_available
+                and authenticity_status != "suspicious"
+            )
         }
 
     def run_full_session(self, candidate_jobs: List[Dict[str, Any]], profile: Dict[str, Any], max_daily_picks: int = 5, learned_boosts: Dict[str, Tuple[int, List[str]]] = None) -> Dict[str, Any]:

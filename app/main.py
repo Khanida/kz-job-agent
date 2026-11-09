@@ -51,6 +51,7 @@ def init_db():
           housing_evidence TEXT, score INTEGER DEFAULT 0, jury_score INTEGER DEFAULT 0,
           is_daily_pick INTEGER DEFAULT 0, advocate_agent TEXT, jury_verdict TEXT,
           liveness_status TEXT DEFAULT 'unverified', liveness_checked_at TEXT,
+          authenticity_status TEXT DEFAULT 'unverified', authenticity_evidence TEXT,
           posted_date TEXT DEFAULT 'Recently posted',
           status TEXT DEFAULT 'new', created_at TEXT
         );
@@ -85,6 +86,8 @@ def init_db():
             ("jury_verdict", "TEXT"),
             ("liveness_status", "TEXT DEFAULT 'unverified'"),
             ("liveness_checked_at", "TEXT"),
+            ("authenticity_status", "TEXT DEFAULT 'unverified'"),
+            ("authenticity_evidence", "TEXT"),
             ("posted_date", "TEXT DEFAULT 'Recently posted'")
         ]:
             try:
@@ -253,6 +256,14 @@ def liveness_badge(status):
     if status == "unavailable":
         return "<span class='pill pill-expired'>🔴 Role appears closed</span>"
     return "<span class='pill pill-unverified'>🟡 Availability unverified</span>"
+
+
+def authenticity_badge(status):
+    if status == "likely_official":
+        return "<span class='pill pill-live'>Domain signal: likely official</span>"
+    if status == "suspicious":
+        return "<span class='pill pill-expired'>Suspicious link</span>"
+    return "<span class='pill pill-unverified'>Employer authenticity unverified</span>"
 
 
 def posting_link(job_id, status):
@@ -453,6 +464,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             dp_verdict = esc(dp["jury_verdict"] or "Approved by Jury")
             dp_status = dp["status"] or "new"
             dp_liveness = dp["liveness_status"] or "unverified"
+            dp_authenticity = dp["authenticity_status"] or "unverified"
 
             action_btn = (
                 f"<span class='pill pill-amber'>★ Shortlisted</span>" if dp_status == "shortlisted" else
@@ -476,6 +488,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <div style='font-size:12px; color:#5a6857; margin-bottom:14px;'>
                   <b>Advocate:</b> {dp_advocate}<br>
                   <b>Posting check:</b> {liveness_badge(dp_liveness)}<br>
+                  <b>Employer link check:</b> {authenticity_badge(dp_authenticity)}<br>
                   <b>Listed:</b> {esc(dp['posted_date'] or 'Recent')}
                 </div>
               </div>
@@ -519,6 +532,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         j_advocate = esc(j['advocate_agent'] or "")
         j_posted = esc(j['posted_date'] or "Recently posted")
         j_liveness = j["liveness_status"] or "unverified"
+        j_authenticity = j["authenticity_status"] or "unverified"
 
         visa_txt = esc(j['visa_evidence'] or 'Not verified')
         housing_txt = esc(j['housing_evidence'] or 'Not verified')
@@ -583,6 +597,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               <div class='pills'>
                 <span class='pill'>{j_source}</span>
                 {liveness_badge(j_liveness)}
+                {authenticity_badge(j_authenticity)}
                 {status_pill}
                 {learned_pill}
               </div>
@@ -773,6 +788,7 @@ def jury_room(msg: str = ""):
         j_advocate = esc(j["advocate_agent"] or "Sub-Agent Consensus")
         j_status = j["status"] or "new"
         j_liveness = j["liveness_status"] or "unverified"
+        j_authenticity = j["authenticity_status"] or "unverified"
 
         # Debate feed
         debate_speeches = []
@@ -785,6 +801,7 @@ def jury_room(msg: str = ""):
                 statement = esc(arg["statement"])
                 
                 avatar = (
+                    "🛡️" if "Authenticity" in agent_name else
                     "🔎" if "Availability" in agent_name else
                     ("📄" if "CV & Target Role" in agent_name else
                     ("💻" if "Software" in agent_name else
@@ -826,6 +843,7 @@ def jury_room(msg: str = ""):
               <div class='pills' style='margin-bottom:6px;'>
                 {crown_badge}
                 {liveness_badge(j_liveness)}
+                {authenticity_badge(j_authenticity)}
                 <span class='pill' style='background:#f3f1e9;'>Advocate: {j_advocate}</span>
               </div>
               <h3 style='margin:0 0 4px; font-size:18px;'>{j_title}</h3>
@@ -1119,9 +1137,15 @@ async def save_profile(
         
     await refresh_daily_selection_if_due(force=True)
 
-    upload_msg = f"CV '{uploaded_filename}' uploaded and analyzed! " if uploaded_filename else ""
     if cv_file and cv_file.filename and extracted_text.startswith("Error extracting"):
         upload_msg = f"CV '{uploaded_filename}' uploaded, but text extraction failed: {extracted_text}. "
+    elif cv_file and cv_file.filename and not extracted_text.strip():
+        upload_msg = (
+            f"CV '{uploaded_filename}' uploaded, but no readable text was extracted. "
+            "Paste its text into the CV field or try another supported format. "
+        )
+    else:
+        upload_msg = f"CV '{uploaded_filename}' uploaded and analyzed! " if uploaded_filename else ""
     role_msg = "CV analysis generated target-role recommendations. " if cv_changed and cv_text.strip() else ""
     msg = f"{upload_msg}{role_msg}Profile saved! Supreme Jury re-convened and updated the daily roster."
     return RedirectResponse("/profile?msg=" + quote_plus(msg), status_code=303)
