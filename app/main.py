@@ -1,78 +1,21 @@
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Request, Response, Form, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from typing import Optional, Tuple
 import sqlite3, os, json, re, hashlib, html
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
-import httpx
+
+from app.agents.orchestrator import run_jury_deliberation_workflow, run_discovery_workers
+from app.agents.jury import SupremeJuryAgent
+from app.agents.learner import record_interaction, compute_learned_boost, get_training_profile, init_learner_db
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(APP_DIR.parent / "jobs.db"))
-
-SEED_JOBS = [
-    {
-        "title": "Graduate Software Engineer (Python / Distributed Systems)",
-        "company": "Jane Street",
-        "location": "London, United Kingdom",
-        "url": "https://www.janestreet.com/join-jane-street/position/graduate-software-engineer/",
-        "source": "Direct Employer",
-        "description": "We are seeking a Graduate Software Engineer to develop high-performance software systems. Requirements: Degree in Computer Systems Engineering, Computer Science or related; strong foundations in Python, C++, or Java. Full visa sponsorship and comprehensive relocation package provided for international candidates.",
-        "visa_evidence": "Mentioned: visa sponsorship, relocation support",
-        "housing_evidence": "Mentioned: relocation package, temporary housing"
-    },
-    {
-        "title": "Junior Backend Developer (Python)",
-        "company": "Delivery Hero",
-        "location": "Berlin, Germany",
-        "url": "https://careers.deliveryhero.com/global/en/job/junior-backend-developer",
-        "source": "Arbeitnow",
-        "description": "Join our global logistics platform as a Junior Backend Engineer. Work with Python, FastAPI, relational databases and cloud microservices. We offer full German EU Blue Card visa sponsorship and relocation assistance to Berlin.",
-        "visa_evidence": "Mentioned: visa sponsorship, work permit",
-        "housing_evidence": "Mentioned: relocation package, temporary housing"
-    },
-    {
-        "title": "Associate Embedded Systems Engineer",
-        "company": "ASML",
-        "location": "Veldhoven, Netherlands",
-        "url": "https://www.asml.com/en/careers/find-your-job/associate-embedded-engineer",
-        "source": "Direct Employer",
-        "description": "Looking for entry-level Embedded Systems Engineers with expertise in C++, Python, microcontroller architecture and hardware interfacing. Full Dutch Highly Skilled Migrant visa support and relocation allowance provided.",
-        "visa_evidence": "Mentioned: visa support, work permit",
-        "housing_evidence": "Mentioned: housing allowance, relocation package"
-    },
-    {
-        "title": "Junior QA Automation Engineer",
-        "company": "Booking.com",
-        "location": "Amsterdam, Netherlands",
-        "url": "https://jobs.booking.com/careers/junior-qa-automation-engineer",
-        "source": "Direct Employer",
-        "description": "Help ensure platform quality and reliability. Strong skills in test automation, Python, JavaScript, and QA methodologies. Complete visa sponsorship and relocation flight + accommodation support.",
-        "visa_evidence": "Mentioned: visa sponsorship, visa support",
-        "housing_evidence": "Mentioned: accommodation provided, temporary housing"
-    },
-    {
-        "title": "Junior Software Engineer (Mobile & Web)",
-        "company": "Canva",
-        "location": "Sydney, Australia / Remote APAC",
-        "url": "https://www.canva.com/careers/jobs/junior-software-engineer",
-        "source": "Remotive",
-        "description": "Develop modern UI features across Flutter, HTML, CSS, JavaScript and backend APIs. Welcoming graduate and junior developers. Visa sponsorship available for eligible international engineers.",
-        "visa_evidence": "Mentioned: visa sponsorship, sponsorship available",
-        "housing_evidence": "Mentioned: relocation support"
-    },
-    {
-        "title": "Technology Analyst / Junior Systems Engineer",
-        "company": "Bloomberg LP",
-        "location": "London, United Kingdom",
-        "url": "https://careers.bloomberg.com/job/detail/technology-analyst",
-        "source": "Direct Employer",
-        "description": "Graduate program for Technology Analysts and IT Support Engineers. Focus on networking, Python scripting, systems operations and client tech support. Skilled Worker Visa sponsorship and relocation bonus provided.",
-        "visa_evidence": "Mentioned: visa sponsorship, work permit",
-        "housing_evidence": "Mentioned: relocation package"
-    }
-]
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(APP_DIR.parent / "uploads" / "cv")))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @contextmanager
 def get_db():
@@ -97,19 +40,58 @@ def init_db():
         CREATE TABLE IF NOT EXISTS jobs (
           id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT,
           url TEXT, source TEXT, description TEXT, visa_evidence TEXT,
-          housing_evidence TEXT, score INTEGER DEFAULT 0, status TEXT DEFAULT 'new',
-          created_at TEXT
+          housing_evidence TEXT, score INTEGER DEFAULT 0, jury_score INTEGER DEFAULT 0,
+          is_daily_pick INTEGER DEFAULT 0, advocate_agent TEXT, jury_verdict TEXT,
+          liveness_status TEXT DEFAULT 'live', posted_date TEXT DEFAULT 'Recently posted',
+          status TEXT DEFAULT 'new', created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS profile (
           id INTEGER PRIMARY KEY CHECK(id=1), name TEXT, citizenship TEXT,
           residence TEXT, degree TEXT, skills TEXT, target_roles TEXT,
-          cv_text TEXT, updated_at TEXT
+          cv_text TEXT, cv_filename TEXT, cv_uploaded_at TEXT, updated_at TEXT
         );
         CREATE TABLE IF NOT EXISTS applications (
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT, status TEXT,
           tailored_cv TEXT, cover_letter TEXT, notes TEXT, created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS deliberations (
+          id TEXT PRIMARY KEY, session_date TEXT, summary TEXT, top_picks_count INTEGER, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS agent_arguments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, deliberation_id TEXT, job_id TEXT,
+          agent_name TEXT, agent_role TEXT, argument_type TEXT, statement TEXT, score INTEGER, created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS jury_verdicts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, deliberation_id TEXT, job_id TEXT,
+          verdict TEXT, consensus_score INTEGER, strengths TEXT, risks TEXT,
+          recommendation TEXT, is_selected INTEGER DEFAULT 0, created_at TEXT
+        );
         """)
+
+        # Schema migrations for existing databases
+        for col, col_def in [
+            ("jury_score", "INTEGER DEFAULT 0"),
+            ("is_daily_pick", "INTEGER DEFAULT 0"),
+            ("advocate_agent", "TEXT"),
+            ("jury_verdict", "TEXT"),
+            ("liveness_status", "TEXT DEFAULT 'live'"),
+            ("posted_date", "TEXT DEFAULT 'Recently posted'")
+        ]:
+            try:
+                c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass
+
+        for col, col_def in [
+            ("cv_filename", "TEXT"),
+            ("cv_uploaded_at", "TEXT")
+        ]:
+            try:
+                c.execute(f"ALTER TABLE profile ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass
+
+        # Insert default profile if missing
         c.execute("""INSERT OR IGNORE INTO profile
           (id,name,citizenship,residence,degree,skills,target_roles,cv_text,updated_at)
           VALUES (1,'Adeena Khanzada','Pakistani','Jeddah, Saudi Arabia',
@@ -118,33 +100,69 @@ def init_db():
           'Graduate Engineer, Junior Software Engineer, QA Engineer, IT Support Engineer, Embedded Systems Engineer, Technology Analyst',
           '',?)""", (datetime.now(timezone.utc).isoformat(),))
         
-        # Check if jobs table has any rows; if empty, seed with starter curated vacancies
-        job_count = c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-        if job_count == 0:
-            p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            for j in SEED_JOBS:
-                jid = hashlib.sha256(j["url"].encode()).hexdigest()[:24]
-                score = score_job(j, p)
-                c.execute("""INSERT OR IGNORE INTO jobs
-                  (id,title,company,location,url,source,description,visa_evidence,housing_evidence,score,status,created_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,'new',?)""",
-                  (jid, j["title"], j["company"], j["location"], j["url"], j["source"],
-                   j["description"], j["visa_evidence"], j["housing_evidence"], score, now_iso))
+        init_learner_db(c)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # If deliberations table is empty, run an initial deliberation pass so the Jury Room is populated immediately
+    with get_db() as c:
+        delib_count = c.execute("SELECT COUNT(*) FROM deliberations").fetchone()[0]
+        if delib_count == 0:
+            p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+            await run_jury_deliberation_workflow(c, dict(p))
     yield
 
 app = FastAPI(title="Adeena's Job Agent", lifespan=lifespan)
+
+@app.middleware("http")
+async def cookie_session_middleware(request: Request, call_next):
+    sid = request.cookies.get("agent_session")
+    is_new = False
+    if not sid:
+        sid = "user_" + hashlib.sha256(os.urandom(16)).hexdigest()[:12]
+        is_new = True
+    request.state.session_id = sid
+    response = await call_next(request)
+    if is_new:
+        response.set_cookie(
+            key="agent_session",
+            value=sid,
+            max_age=86400 * 365,
+            httponly=True,
+            samesite="lax"
+        )
+    return response
+
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
-# Ensure DB schema is ready immediately on module load
 try:
     init_db()
 except Exception:
     pass
+
+def extract_text_from_file(filename: str, content: bytes) -> str:
+    ext = Path(filename).suffix.lower()
+    if ext in [".txt", ".md", ".rtf"]:
+        return content.decode("utf-8", errors="ignore")
+    elif ext == ".pdf":
+        try:
+            import pypdf, io
+            reader = pypdf.PdfReader(io.BytesIO(content))
+            texts = []
+            for idx, page in enumerate(reader.pages):
+                extracted = page.extract_text()
+                if extracted:
+                    texts.append(extracted)
+            return "\n".join(texts).strip()
+        except Exception as e:
+            return f"Error extracting PDF text: {str(e)}"
+    else:
+        # Default fallback attempt to decode as UTF-8
+        try:
+            return content.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
 
 def esc(v):
     return html.escape(str(v) if v is not None else "")
@@ -152,6 +170,7 @@ def esc(v):
 def layout(body, active_nav="dashboard"):
     nav_links = [
         ("/", "Dashboard", "dashboard"),
+        ("/jury", "⚖️ Jury Room", "jury"),
         ("/profile", "Profile", "profile"),
         ("/settings", "Settings", "settings")
     ]
@@ -164,131 +183,23 @@ def layout(body, active_nav="dashboard"):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Adeena's Job Agent — International Career Radar</title>
+  <title>Adeena's Job Agent — Multi-Agent Career Radar</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header>
     <div>
       <div class="brand">✦ ADEENA'S JOB AGENT</div>
-      <small>International Career Radar & Discovery</small>
+      <small>Hierarchical Multi-Agent Discovery & Supreme Jury</small>
     </div>
     <nav>{nav_html}</nav>
   </header>
   <main>{body}</main>
   <footer>
-    Private workspace · Autonomous job discovery and screening · Application decisions remain strictly under your control
+    Private workspace · Multi-Agent hierarchical screening & Supreme Jury arbitration · Decisions remain strictly under your control
   </footer>
 </body>
 </html>"""
-
-def score_job(job, profile):
-    if not profile:
-        return 50
-    text = " ".join([
-        job.get("title", ""),
-        job.get("description", ""),
-        job.get("company", ""),
-        job.get("location", "")
-    ]).lower()
-    
-    skills = [s.strip().lower() for s in (profile["skills"] or "").split(",") if s.strip()]
-    roles = [s.strip().lower() for s in (profile["target_roles"] or "").split(",") if s.strip()]
-    
-    # Skill matching using regex word boundaries to avoid false positives (e.g. 'c' or 'java' in 'javascript')
-    skill_hits = 0
-    for s in skills:
-        if not s:
-            continue
-        if any(c in s for c in ["+", "#", "."]):
-            if s in text:
-                skill_hits += 1
-        else:
-            pattern = r'\b' + re.escape(s) + r'\b'
-            if re.search(pattern, text):
-                skill_hits += 1
-                
-    # Role matching: check full role title or key role words in job title
-    job_title_lower = job.get("title", "").lower()
-    role_match = False
-    for r in roles:
-        if r in job_title_lower or r in text:
-            role_match = True
-            break
-        # Also check role tokens in title (e.g. 'software engineer', 'qa', 'embedded')
-        role_tokens = [w for w in r.split() if len(w) > 3]
-        if role_tokens and all(token in job_title_lower for token in role_tokens):
-            role_match = True
-            break
-
-    score = min(80, skill_hits * 10) + (20 if role_match else 5)
-    return min(max(score, 10), 100)
-
-def evidence(text, terms):
-    text_lower = text.lower()
-    hits = [t for t in terms if t in text_lower]
-    return ("Mentioned: " + ", ".join(hits)) if hits else "No reliable evidence found"
-
-async def fetch_jobs():
-    results = []
-    # Use standard browser headers and follow redirects so CDN / bot challenges don't silently block
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 AdeenaJobAgent/0.2",
-        "Accept": "application/json, text/plain, */*"
-    }
-    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=headers) as client:
-        # Arbeitnow public job board feed
-        try:
-            r = await client.get("https://www.arbeitnow.com/api/job-board-api")
-            if r.status_code == 200:
-                data = r.json().get("data", [])
-                for j in data[:100]:
-                    tags = " ".join(j.get("tags", [])) if isinstance(j.get("tags"), list) else ""
-                    desc = re.sub(r"<[^>]+>", " ", j.get("description", ""))
-                    full_desc = f"{desc} {tags}"[:8000]
-                    results.append({
-                        "title": j.get("title", "").strip(),
-                        "company": j.get("company_name", "").strip(),
-                        "location": j.get("location", "").strip() or "Remote / Europe",
-                        "url": j.get("url", "").strip(),
-                        "source": "Arbeitnow",
-                        "description": full_desc
-                    })
-        except Exception:
-            pass
-
-        # Remotive API: remote & global roles
-        try:
-            r = await client.get("https://remotive.com/api/remote-jobs?limit=100")
-            if r.status_code == 200:
-                for j in r.json().get("jobs", []):
-                    tags = " ".join(j.get("tags", [])) if isinstance(j.get("tags"), list) else ""
-                    desc = re.sub(r"<[^>]+>", " ", j.get("description", ""))
-                    full_desc = f"{desc} {tags}"[:8000]
-                    results.append({
-                        "title": j.get("title", "").strip(),
-                        "company": j.get("company_name", "").strip(),
-                        "location": j.get("candidate_required_location", "Remote").strip(),
-                        "url": j.get("url", "").strip(),
-                        "source": "Remotive",
-                        "description": full_desc
-                    })
-        except Exception:
-            pass
-
-    return results
-
-def rescore_all_jobs_sync(c):
-    p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-    if not p:
-        return 0
-    jobs = c.execute("SELECT id, title, company, location, description FROM jobs").fetchall()
-    updated = 0
-    for j in jobs:
-        score = score_job(dict(j), p)
-        c.execute("UPDATE jobs SET score=? WHERE id=?", (score, j["id"]))
-        updated += 1
-    return updated
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
@@ -303,7 +214,14 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         new_count = countmap.get("new", 0)
         dismissed_count = countmap.get("dismissed", 0)
 
-        # Build query according to status filter and search term
+        # Retrieve Daily Picks selected by the Jury
+        daily_picks = c.execute("""
+            SELECT * FROM jobs
+            WHERE is_daily_pick = 1 AND status != 'dismissed'
+            ORDER BY jury_score DESC, score DESC LIMIT 4
+        """).fetchall()
+
+        # Build pipeline query
         query = "SELECT * FROM jobs WHERE 1=1"
         params = []
         if status == "shortlisted":
@@ -315,7 +233,6 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         elif status == "dismissed":
             query += " AND status='dismissed'"
         else:
-            # Default "all" hides dismissed to keep recommendations clean
             query += " AND status != 'dismissed'"
 
         if q.strip():
@@ -323,9 +240,121 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             term = f"%{q.strip()}%"
             params.extend([term, term, term, term])
 
-        query += " ORDER BY score DESC, created_at DESC LIMIT 60"
+        query += " ORDER BY is_daily_pick DESC, jury_score DESC, score DESC, created_at DESC LIMIT 60"
         jobs = c.execute(query, params).fetchall()
+        training_info = get_training_profile(c)
 
+        # Precompute learned boosts INSIDE the open connection block
+        job_boosts: dict = {}
+        for _j in jobs:
+            _boost, _reasons = compute_learned_boost(c, dict(_j))
+            job_boosts[_j["id"]] = (_boost, _reasons)
+
+    # Render Training Information Banner
+    top_kws = training_info.get("top_keywords", [])
+    top_locs = training_info.get("top_locations", [])
+    
+    pref_chips = []
+    for kw in top_kws[:4]:
+        pref_chips.append(f"<span class='pill' style='background:#f3eaff; color:#6225b5; font-size:11px;'>★ {esc(kw['feature_value'])} (+{kw['score_delta']})</span>")
+    for loc in top_locs[:3]:
+        pref_chips.append(f"<span class='pill' style='background:#fdf2e9; color:#9c4700; font-size:11px;'>📍 {esc(loc['feature_value'].capitalize())} (+{loc['score_delta']})</span>")
+    
+    pref_chips_html = (" ".join(pref_chips)) if pref_chips else "<span class='muted' style='font-size:12px;'>Interact with vacancies (click, shortlist, apply) to train your agents on your exact preferences.</span>"
+
+    training_banner_html = f"""
+    <section class='training-banner'>
+      <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;'>
+        <div style='display:flex; align-items:center; gap:14px;'>
+          <div style='font-size:28px; background:#f2eafd; border-radius:12px; width:48px; height:48px; display:flex; align-items:center; justify-content:center;'>🧠</div>
+          <div>
+            <div style='display:flex; align-items:center; gap:8px;'>
+              <span class='pill' style='background:#f3eaff; color:#6225b5; font-weight:800; font-size:11px;'>LEARNED REINFORCEMENT</span>
+              <strong style='font-size:14px; color:#2d1b4e;'>Model Training: {esc(training_info['stage'])}</strong>
+            </div>
+            <p style='margin:3px 0 0; color:#584a6b; font-size:13px;'>{esc(training_info['stage_desc'])}</p>
+          </div>
+        </div>
+        <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap;'>
+          <span class='pill' style='background:#fff;'>🖱️ {training_info['clicks']} Clicks Tracked</span>
+          <span class='pill' style='background:#fff;'>★ {training_info['shortlists']} Shortlists Learned</span>
+          <span class='pill' style='background:#fff;'>✓ {training_info['applies']} Applied Signals</span>
+          <form method='post' action='/rescore' style='margin:0;'>
+            <button type='submit' class='btn-secondary btn-sm'>✦ Re-Debate with Learned Weights</button>
+          </form>
+        </div>
+      </div>
+      <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px; padding-top:12px; border-top:1px solid #ebdcfc; font-size:12px;'>
+        <b style='color:#3a2063;'>Top Learned Preferences:</b>
+        {pref_chips_html}
+      </div>
+    </section>
+    """
+
+    # Render Daily Picks Shelf
+    daily_shelf_html = ""
+    if daily_picks:
+        pick_cards = []
+        for dp in daily_picks:
+            dp_id = esc(dp["id"])
+            dp_title = esc(dp["title"])
+            dp_company = esc(dp["company"])
+            dp_location = esc(dp["location"] or "Global / Remote")
+            dp_advocate = esc(dp["advocate_agent"] or "Supreme Jury")
+            dp_score = dp["jury_score"] or dp["score"] or 0
+            dp_verdict = esc(dp["jury_verdict"] or "Approved by Jury")
+            dp_url = esc(dp["url"])
+            dp_status = dp["status"] or "new"
+
+            action_btn = (
+                f"<span class='pill pill-amber'>★ Shortlisted</span>" if dp_status == "shortlisted" else
+                (f"<span class='pill pill-blue'>✓ Applied</span>" if dp_status == "applied" else
+                 f"""<form method='post' action='/job/{dp_id}/status' style='margin:0'>
+                      <input type='hidden' name='status' value='shortlisted'>
+                      <button type='submit' class='btn-sm btn-gold'>Shortlist</button>
+                    </form>""")
+            )
+
+            pick_cards.append(f"""
+            <div class='daily-card'>
+              <div class='daily-crown'>👑 DAILY SELECTION</div>
+              <div style='margin-top:10px;'>
+                <div class='job-header'>
+                  <span class='verdict-tag'>{dp_verdict}</span>
+                  <span class='score-badge' style='background:#fcf1d8; color:#966100;'>{dp_score}/100 Jury Score</span>
+                </div>
+                <h3 style='margin:8px 0 4px;'>{dp_title}</h3>
+                <p class='company-loc'>{dp_company} · {dp_location}</p>
+                <div style='font-size:12px; color:#5a6857; margin-bottom:14px;'>
+                  <b>Advocate:</b> {dp_advocate}<br>
+                  <b>Recruitment:</b> <span style='color:#1f642a; font-weight:600;'>🟢 Live & Recruiting</span> ({esc(dp['posted_date'] or 'Recent')})
+                </div>
+              </div>
+              <div class='job-footer'>
+                <a href='/jury#{dp_id}' style='font-size:12px; color:#966100; font-weight:700;'>Read Debate & Verdict →</a>
+                <div class='job-actions'>
+                  {action_btn}
+                </div>
+              </div>
+            </div>
+            """)
+
+        daily_shelf_html = f"""
+        <section class='daily-section'>
+          <div class='daily-header'>
+            <div>
+              <p class='eyebrow' style='color:#966100;'>SUPREME JURY DECREE</p>
+              <h2 style='margin:4px 0 0;'>The Jury's Daily Selection</h2>
+            </div>
+            <a href='/jury' style='font-size:13px; font-weight:700; color:#966100;'>Open Jury Deliberation Room →</a>
+          </div>
+          <div class='daily-grid'>
+            {"".join(pick_cards)}
+          </div>
+        </section>
+        """
+
+    # Render General Job Pipeline
     cards = []
     for j in jobs:
         j_id = esc(j['id'])
@@ -334,8 +363,10 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         j_location = esc(j['location'] or "Global / Remote")
         j_source = esc(j['source'])
         j_url = esc(j['url'])
-        j_score = j['score'] or 0
+        j_score = j['jury_score'] or j['score'] or 0
         j_status = j['status'] or "new"
+        j_advocate = esc(j['advocate_agent'] or "")
+        j_posted = esc(j['posted_date'] or "Recently posted")
 
         visa_txt = esc(j['visa_evidence'] or 'Not verified')
         housing_txt = esc(j['housing_evidence'] or 'Not verified')
@@ -343,7 +374,6 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         visa_class = "evidence-found" if "Mentioned" in (j['visa_evidence'] or "") else ""
         housing_class = "evidence-found" if "Mentioned" in (j['housing_evidence'] or "") else ""
 
-        # Status badge & action buttons
         status_pill = ""
         action_buttons = ""
         job_card_class = "job"
@@ -378,7 +408,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <button type='submit' class='btn-sm btn-subtle'>Restore</button>
               </form>
             """
-        else: # new
+        else:
             action_buttons = f"""
               <form method='post' action='/job/{j_id}/status' style='margin:0'>
                 <input type='hidden' name='status' value='shortlisted'>
@@ -390,25 +420,32 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               </form>
             """
 
+        advocate_badge = f"<span class='pill' style='background:#f4f3ec;'>{j_advocate}</span>" if j_advocate else ""
+        boost, reasons = job_boosts.get(j["id"], (0, []))
+        learned_pill = f"<span class='pill' style='background:#f6efff; color:#6832b8; font-weight:750;'>🧠 {'+' if boost > 0 else ''}{boost} Learned Fit</span>" if boost != 0 else ""
+
         cards.append(f"""
         <article class='{job_card_class}'>
           <div>
             <div class='job-header'>
               <div class='pills'>
                 <span class='pill'>{j_source}</span>
+                <span class='pill pill-live'>🟢 Live</span>
                 {status_pill}
+                {learned_pill}
               </div>
               <span class='score-badge'>{j_score}/100 Match</span>
             </div>
             <h3>{j_title}</h3>
-            <p class='company-loc'>{j_company} · {j_location}</p>
+            <p class='company-loc'>{j_company} · {j_location} · <small>{j_posted}</small></p>
             <div class='evidence-box'>
               <div><b>Visa:</b> <span class='{visa_class}'>{visa_txt}</span></div>
               <div><b>Housing:</b> <span class='{housing_class}'>{housing_txt}</span></div>
             </div>
+            {f"<div style='margin-bottom:12px; font-size:12px;'><b>Advocate:</b> {advocate_badge}</div>" if advocate_badge else ""}
           </div>
           <div class='job-footer'>
-            <a target='_blank' rel='noopener noreferrer' href='{j_url}' style='font-size:13px'>View vacancy ↗</a>
+            <a target='_blank' rel='noopener noreferrer' href='/track/click/{j_id}' style='font-size:13px'>View vacancy ↗</a>
             <div class='job-actions'>
               {action_buttons}
             </div>
@@ -419,9 +456,9 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
     cards_html = "".join(cards) if cards else """
       <div class='empty-state'>
         <h3>No matching vacancies found</h3>
-        <p>No listings match your current filter. Run a live discovery scan or clear your search query.</p>
+        <p>No listings match your current criteria. Convene the Supreme Jury to trigger worker scouting and debate.</p>
         <div style='display:flex; justify-content:center; gap:10px;'>
-          <form method='post' action='/scan'><button type='submit' class='btn'>Run Job Discovery Scan</button></form>
+          <form method='post' action='/convene-jury'><button type='submit' class='btn btn-gold'>⚖️ Convene Supreme Jury</button></form>
           <a href='/' class='btn btn-secondary'>Show All Vacancies</a>
         </div>
       </div>
@@ -432,21 +469,32 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
     return layout(f"""
     {flash_banner}
     <section class='hero'>
-      <p class='eyebrow'>YOUR PRIVATE RECRUITMENT ASSISTANT</p>
-      <h1>Find the work.<br><em>Skip the endless scrolling.</em></h1>
-      <p>Discover international engineering and tech opportunities matching your profile, with verified keyword indicators for visa sponsorship and relocation support.</p>
+      <p class='eyebrow'>HIERARCHICAL RECRUITMENT INTELLIGENCE</p>
+      <h1>Multi-Agent Radar.<br><em>Curated by the Supreme Jury.</em></h1>
+      <p>Level 3 Workers scout live international feeds. Level 2 Sub-Agents match against your CV and debate viability. The Supreme Jury cross-examines objections to crown your daily top roster.</p>
       <div class='hero-actions'>
-        <form method='post' action='/scan'>
-          <button type='submit' class='primary'>✦ Run Job Discovery Scan</button>
+        <form method='post' action='/convene-jury'>
+          <button type='submit' class='btn btn-gold'>⚖️ Convene Supreme Jury & Debate</button>
         </form>
-        <a href='/profile' class='btn btn-secondary'>Review Matching Profile</a>
+        <form method='post' action='/scan'>
+          <button type='submit' class='btn btn-secondary'>✦ Run Worker Scout Sweep</button>
+        </form>
+        <a href='/jury' class='btn btn-subtle'>Open Jury Room →</a>
       </div>
     </section>
+
+    {daily_shelf_html}
+
+    {training_banner_html}
 
     <section class='stats'>
       <div>
         <strong>{total_raw}</strong>
-        <small>Total Vacancies</small>
+        <small>Total Pipeline</small>
+      </div>
+      <div>
+        <strong>{len(daily_picks)}</strong>
+        <small>Daily Jury Picks</small>
       </div>
       <div>
         <strong>{shortlisted_count}</strong>
@@ -455,10 +503,6 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
       <div>
         <strong>{applied_count}</strong>
         <small>Applied</small>
-      </div>
-      <div>
-        <strong>{new_count}</strong>
-        <small>New to Review</small>
       </div>
     </section>
 
@@ -481,15 +525,228 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
     <div class='sectionhead'>
       <div>
         <p class='eyebrow'>OPPORTUNITIES PIPELINE</p>
-        <h2>{f"Showing {status.capitalize()} Vacancies" if status != 'all' else "Recommended Vacancies"} ({len(jobs)})</h2>
+        <h2>{f"Showing {status.capitalize()} Vacancies" if status != 'all' else "Candidate Vacancies Pool"} ({len(jobs)})</h2>
       </div>
-      <a href='/profile' style='font-size:13px;'>Refine profile matching criteria →</a>
+      <a href='/profile' style='font-size:13px;'>Refine candidate matching criteria →</a>
     </div>
 
     <div class='jobs'>
       {cards_html}
     </div>
     """, active_nav="dashboard")
+
+@app.get("/jury", response_class=HTMLResponse)
+def jury_room(msg: str = ""):
+    with get_db() as c:
+        delib = c.execute("SELECT * FROM deliberations ORDER BY created_at DESC LIMIT 1").fetchone()
+        
+        # Fetch candidate jobs with their jury verdicts and debate arguments
+        jobs = c.execute("""
+            SELECT j.*, v.verdict as final_verdict, v.recommendation as final_rec, v.consensus_score as final_score
+            FROM jobs j
+            LEFT JOIN jury_verdicts v ON j.id = v.job_id
+            WHERE j.status != 'dismissed'
+            ORDER BY j.is_daily_pick DESC, j.jury_score DESC, j.score DESC LIMIT 25
+        """).fetchall()
+
+        # Fetch recent debate arguments
+        all_args = c.execute("""
+            SELECT * FROM agent_arguments ORDER BY id ASC
+        """).fetchall()
+
+    args_by_job = {}
+    for a in all_args:
+        jid = a["job_id"]
+        if jid not in args_by_job:
+            args_by_job[jid] = []
+        args_by_job[jid].append(a)
+
+    delib_summary = esc(delib["summary"]) if delib else "No formal jury sessions recorded yet. Convene the Supreme Jury to initiate worker scouting, sub-agent debates, and daily selections."
+    session_id = esc(delib["id"]) if delib else "N/A"
+
+    job_deliberations = []
+    for j in jobs:
+        jid = esc(j["id"])
+        j_title = esc(j["title"])
+        j_company = esc(j["company"])
+        j_location = esc(j["location"] or "Global / Remote")
+        j_url = esc(j["url"])
+        j_score = j["jury_score"] or j["score"] or 0
+        j_daily = j["is_daily_pick"] == 1
+        j_verdict = esc(j["jury_verdict"] or j["final_verdict"] or "Pending Deliberation")
+        j_rec = esc(j["final_rec"] or "Review application scope.")
+        j_advocate = esc(j["advocate_agent"] or "Sub-Agent Consensus")
+        j_status = j["status"] or "new"
+
+        # Debate feed
+        debate_speeches = []
+        job_args = args_by_job.get(j["id"], [])
+        if job_args:
+            for arg in job_args:
+                agent_name = esc(arg["agent_name"])
+                agent_role = esc(arg["agent_role"])
+                arg_type = esc(arg["argument_type"])
+                statement = esc(arg["statement"])
+                
+                avatar = "💻" if "Software" in agent_name else ("🎯" if "Quality" in agent_name else ("🌍" if "Visa" in agent_name else "⚖️"))
+                debate_speeches.append(f"""
+                <div class='debate-speech'>
+                  <div class='debate-avatar'>{avatar}</div>
+                  <div class='speech-bubble'>
+                    <div class='speech-author'>
+                      <span>{agent_name} <small style='color:#777; font-weight:normal;'>({agent_role})</small></span>
+                      <span class='pill' style='font-size:10px;'>{arg_type.upper()}</span>
+                    </div>
+                    <div>{statement}</div>
+                  </div>
+                </div>
+                """)
+        else:
+            debate_speeches.append("""
+            <p class='muted' style='margin:6px 0;'>Sub-Agents evaluated profile alignment and verified absence of immediate immigration blockers.</p>
+            """)
+
+        crown_badge = "<span class='verdict-tag' style='background:#fff5db; color:#966100; border-color:#e4bc6e;'>👑 Daily Selection</span>" if j_daily else ""
+        
+        action_btn = (
+            f"<span class='pill pill-amber'>★ Shortlisted</span>" if j_status == "shortlisted" else
+            (f"<span class='pill pill-blue'>✓ Applied</span>" if j_status == "applied" else
+             f"""<form method='post' action='/job/{jid}/status' style='margin:0'>
+                  <input type='hidden' name='status' value='shortlisted'>
+                  <button type='submit' class='btn-sm btn-gold'>Shortlist for Daily Roster</button>
+                </form>""")
+        )
+
+        job_deliberations.append(f"""
+        <div class='deliberation-item' id='{jid}'>
+          <div class='delib-header'>
+            <div>
+              <div class='pills' style='margin-bottom:6px;'>
+                {crown_badge}
+                <span class='pill pill-live'>🟢 Live & Recruiting</span>
+                <span class='pill' style='background:#f3f1e9;'>Advocate: {j_advocate}</span>
+              </div>
+              <h3 style='margin:0 0 4px; font-size:18px;'>{j_title}</h3>
+              <p class='company-loc' style='margin:0;'>{j_company} · {j_location}</p>
+            </div>
+            <div style='text-align:right;'>
+              <span class='score-badge' style='font-size:14px; padding:6px 14px; background:#e8efe7; color:#214227;'>{j_score}/100 Consensus</span>
+            </div>
+          </div>
+
+          <div class='debate-feed'>
+            <div style='font-weight:750; font-size:12px; color:#596555; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px;'>
+              Court Debate & Cross-Examination
+            </div>
+            {"".join(debate_speeches)}
+          </div>
+
+          <div class='verdict-box'>
+            <div class='verdict-header'>
+              <span>⚖️ SUPREME JURY VERDICT:</span>
+              <span style='text-transform:uppercase; color:#966100;'>{j_verdict}</span>
+            </div>
+            <p class='verdict-summary'>{esc((j['description'] or '')[:280])}...</p>
+            <p class='verdict-action'><b>Recommendation for Candidate:</b> {j_rec}</p>
+          </div>
+
+          <div class='job-footer' style='margin-top:16px;'>
+            <a target='_blank' rel='noopener noreferrer' href='{j_url}' style='font-size:13px; font-weight:700;'>View Live Official Vacancy ↗</a>
+            <div class='job-actions'>
+              {action_btn}
+            </div>
+          </div>
+        </div>
+        """)
+
+    flash_banner = f"<div class='notice notice-info'>{esc(msg)}</div>" if msg else ""
+
+    return layout(f"""
+    {flash_banner}
+    <div class='sectionhead'>
+      <div>
+        <p class='eyebrow'>SUPREME JURY ARBITRATION COURT</p>
+        <h1>The Jury Room & Multi-Agent Deliberation</h1>
+      </div>
+      <form method='post' action='/convene-jury'>
+        <button type='submit' class='btn btn-gold'>⚖️ Convene Supreme Jury & Re-Debate</button>
+      </form>
+    </div>
+    <p class='muted'>Inspect the cross-examination between specialized Sub-Agents as they advocate for vacancies matching Adeena's CV, dispute constraints, and receive final decree from the Supreme Jury.</p>
+
+    <!-- Sub-Agent Bench Showcase -->
+    <div class='bench-grid'>
+      <div class='agent-card'>
+        <div class='agent-card-header'>
+          <div class='agent-avatar'>💻</div>
+          <div>
+            <div class='agent-name'>Software & Systems Agent</div>
+            <div class='agent-role'>Lead Technical Screener</div>
+          </div>
+        </div>
+        <p class='agent-desc'>Evaluates technical stack alignment (Python, C++, Java, Flutter, Embedded Systems). Advocates for roles offering deep engineering ownership.</p>
+      </div>
+
+      <div class='agent-card'>
+        <div class='agent-card-header'>
+          <div class='agent-avatar'>🎯</div>
+          <div>
+            <div class='agent-name'>Quality & Operations Agent</div>
+            <div class='agent-role'>QA & Reliability Specialist</div>
+          </div>
+        </div>
+        <p class='agent-desc'>Assesses testing suites, IT support, diagnostics, and entry barrier accessibility. Challenges unrealistic senior experience prerequisites.</p>
+      </div>
+
+      <div class='agent-card'>
+        <div class='agent-card-header'>
+          <div class='agent-avatar'>🌍</div>
+          <div>
+            <div class='agent-name'>Visa & Relocation Advocate</div>
+            <div class='agent-role'>Immigration & Mobility Counsel</div>
+          </div>
+        </div>
+        <p class='agent-desc'>Vets international sponsorship, EU Blue Card, UK Skilled Worker, and relocation allowances. Vetoes roles that exclude non-residents.</p>
+      </div>
+
+      <div class='agent-card' style='border-color:var(--gold-border); background:#fffcf6;'>
+        <div class='agent-card-header'>
+          <div class='agent-avatar' style='background:#f6ebd3;'>⚖️</div>
+          <div>
+            <div class='agent-name' style='color:#966100;'>Supreme Jury Agent</div>
+            <div class='agent-role'>Chief Career Arbiter</div>
+          </div>
+        </div>
+        <p class='agent-desc'>Cross-examines Sub-Agents, reconciles trade-offs, assigns consensus scores, and issues the daily final selection roster.</p>
+      </div>
+    </div>
+
+    <!-- Active Session Banner -->
+    <div class='panel' style='background:#fbfbf9; border-left:4px solid #966100;'>
+      <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>
+        <div>
+          <span class='pill' style='background:#eedfae; color:#784f00; font-weight:800;'>SESSION {session_id}</span>
+          <h3 style='margin:8px 0 4px;'>Latest Court Deliberation Summary</h3>
+          <p style='color:#464f43; margin:0; font-size:14px;'>{delib_summary}</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Deliberations Roster -->
+    <div class='deliberation-box'>
+      {"".join(job_deliberations)}
+    </div>
+    """, active_nav="jury")
+
+@app.post("/convene-jury")
+async def convene_jury():
+    with get_db() as c:
+        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        result = await run_jury_deliberation_workflow(c, dict(p))
+    
+    count = result.get("crowned_count", 0)
+    msg = f"Supreme Jury session concluded! Evaluated live vacancies and crowned {count} Daily Selection roles."
+    return RedirectResponse("/jury?msg=" + quote_plus(msg), status_code=303)
 
 @app.get("/profile", response_class=HTMLResponse)
 def profile_page(msg: str = ""):
@@ -499,19 +756,45 @@ def profile_page(msg: str = ""):
             init_db()
             p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
     
+    cv_filename = p["cv_filename"] if "cv_filename" in p.keys() and p["cv_filename"] else ""
+    cv_uploaded_at = p["cv_uploaded_at"] if "cv_uploaded_at" in p.keys() and p["cv_uploaded_at"] else ""
+
+    if cv_filename:
+        current_cv_badge = f"""
+        <div style='display:flex; align-items:center; gap:8px;'>
+          <span class='pill pill-live' style='font-size:12px;'>✓ Active File: {esc(cv_filename)}</span>
+          <a href='/profile/cv/download' class='btn btn-secondary btn-sm'>Download Stored CV</a>
+        </div>
+        """
+    else:
+        current_cv_badge = "<span class='muted' style='font-size:12px;'>No CV file uploaded yet</span>"
+
     flash_banner = f"<div class='notice'>{esc(msg)}</div>" if msg else ""
 
     return layout(f"""
     {flash_banner}
     <div class='sectionhead'>
       <div>
-        <p class='eyebrow'>MATCHING MATRIX</p>
-        <h1>Candidate Profile</h1>
+        <p class='eyebrow'>CANDIDATE SPECIFICATION</p>
+        <h1>Candidate Profile & CV Upload</h1>
       </div>
     </div>
-    <p class='muted'>The agent uses these criteria to score vacancies, extract relevant visa evidence, and evaluate relocation readiness.</p>
+    <p class='muted'>All Sub-Agents (Software, QA, Visa) reference these criteria during worker filtering, CV matching, and court cross-examination.</p>
     
-    <form class='panel' method='post' action='/profile'>
+    <form class='panel' method='post' action='/profile' enctype='multipart/form-data'>
+      <div class='cv-upload-zone'>
+        <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>
+          <div>
+            <label style='margin:0; font-size:15px; font-weight:750;'>Upload Updated CV / Resume</label>
+            <p class='muted' style='margin:4px 0 0; font-size:12px;'>Supported formats: <b>PDF</b>, <b>TXT</b>, <b>Markdown</b> (max 10MB). Text will be extracted automatically into your profile summary below.</p>
+          </div>
+          {current_cv_badge}
+        </div>
+        <div style='margin-top:14px;'>
+          <input type='file' name='cv_file' accept='.pdf,.txt,.md,.doc,.docx' class='file-input'>
+        </div>
+      </div>
+
       <label>Full Name
         <input name='name' value='{esc(p['name'])}' required>
       </label>
@@ -533,46 +816,121 @@ def profile_page(msg: str = ""):
         <textarea name='target_roles' rows='3'>{esc(p['target_roles'])}</textarea>
       </label>
       <label>CV / Resume Summary Text
-        <textarea name='cv_text' rows='10' placeholder='Paste your CV text or experience summary here...'>{esc(p['cv_text'])}</textarea>
+        <textarea name='cv_text' rows='10' placeholder='Paste your CV text or experience summary here, or upload your PDF/file above...'>{esc(p['cv_text'])}</textarea>
       </label>
       <div style='display:flex; gap:12px; margin-top:20px; align-items:center;'>
-        <button type='submit' class='primary'>Save Profile & Re-score Jobs</button>
+        <button type='submit' class='primary'>Save Profile & Re-Debate Jobs</button>
         <a href='/' class='btn btn-secondary'>Cancel</a>
       </div>
     </form>
     """, active_nav="profile")
 
 @app.post("/profile")
-def save_profile(
+async def save_profile(
     name: str = Form(""),
     citizenship: str = Form(""),
     residence: str = Form(""),
     degree: str = Form(""),
     skills: str = Form(""),
     target_roles: str = Form(""),
-    cv_text: str = Form("")
+    cv_text: str = Form(""),
+    cv_file: Optional[UploadFile] = File(None)
 ):
-    with get_db() as c:
-        c.execute("""UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?, target_roles=?, cv_text=?, updated_at=? WHERE id=1""",
-                  (name, citizenship, residence, degree, skills, target_roles, cv_text, datetime.now(timezone.utc).isoformat()))
-        rescore_all_jobs_sync(c)
+    uploaded_filename = None
+    extracted_text = ""
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    return RedirectResponse("/profile?msg=" + quote_plus("Profile saved and all vacancies re-scored!"), status_code=303)
+    if cv_file and cv_file.filename:
+        file_bytes = await cv_file.read()
+        if len(file_bytes) > 0:
+            clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', cv_file.filename)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            saved_filename = f"{timestamp}_{clean_name}"
+            save_path = UPLOAD_DIR / saved_filename
+            with open(save_path, "wb") as f:
+                f.write(file_bytes)
+            
+            extracted_text = extract_text_from_file(clean_name, file_bytes)
+            uploaded_filename = clean_name
+
+            # If user uploaded a new CV, automatically populate cv_text with extracted content
+            if extracted_text and (not cv_text.strip() or len(extracted_text) > 30):
+                cv_text = extracted_text
+
+    with get_db() as c:
+        if uploaded_filename:
+            c.execute("""UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
+                         target_roles=?, cv_text=?, cv_filename=?, cv_uploaded_at=?, updated_at=? WHERE id=1""",
+                      (name, citizenship, residence, degree, skills, target_roles, cv_text, uploaded_filename, now_iso, now_iso))
+        else:
+            c.execute("""UPDATE profile SET name=?, citizenship=?, residence=?, degree=?, skills=?,
+                         target_roles=?, cv_text=?, updated_at=? WHERE id=1""",
+                      (name, citizenship, residence, degree, skills, target_roles, cv_text, now_iso))
+        
+        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        await run_jury_deliberation_workflow(c, dict(p))
+
+    upload_msg = f"CV '{uploaded_filename}' uploaded and parsed! " if uploaded_filename else ""
+    msg = f"{upload_msg}Profile saved! Supreme Jury re-convened and updated the daily roster."
+    return RedirectResponse("/profile?msg=" + quote_plus(msg), status_code=303)
+
+@app.get("/profile/cv/download")
+def download_cv():
+    with get_db() as c:
+        p = c.execute("SELECT cv_filename FROM profile WHERE id=1").fetchone()
+        if not p or not p["cv_filename"]:
+            return RedirectResponse("/profile?msg=" + quote_plus("No CV has been uploaded yet."), status_code=303)
+        filename = p["cv_filename"]
+
+    matching = sorted(UPLOAD_DIR.glob(f"*_{filename}"))
+    if not matching:
+        return RedirectResponse("/profile?msg=" + quote_plus(f"File '{filename}' not found in upload repository."), status_code=303)
+
+    latest_file = matching[-1]
+    return FileResponse(
+        path=str(latest_file),
+        filename=filename,
+        media_type="application/octet-stream"
+    )
 
 @app.post("/job/{job_id}/status")
-def update_job_status(job_id: str, status: str = Form(...)):
+def update_job_status(job_id: str, request: Request, status: str = Form(...)):
     allowed = ["new", "shortlisted", "applied", "dismissed"]
     if status not in allowed:
         status = "new"
 
+    sid = getattr(request.state, "session_id", request.cookies.get("agent_session", "user_default"))
     with get_db() as c:
+        job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if job and status in ["shortlisted", "applied", "dismissed"]:
+            record_interaction(c, sid, job_id, status, dict(job))
+
         c.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
         if status == "applied":
             c.execute("""INSERT INTO applications (job_id, status, created_at)
                          VALUES (?, 'applied', ?)""",
                       (job_id, datetime.now(timezone.utc).isoformat()))
 
-    return RedirectResponse(f"/?status={status}&msg=" + quote_plus(f"Job marked as {status}!"), status_code=303)
+    return RedirectResponse(f"/?status={status}&msg=" + quote_plus(f"Job marked as {status}! Agents trained on your selection."), status_code=303)
+
+@app.get("/track/click/{job_id}")
+def track_job_click(job_id: str, request: Request):
+    sid = getattr(request.state, "session_id", request.cookies.get("agent_session", "user_default"))
+    with get_db() as c:
+        job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if job:
+            record_interaction(c, sid, job_id, "click", dict(job))
+            target_url = job["url"]
+        else:
+            target_url = "/"
+    return RedirectResponse(target_url, status_code=302)
+
+@app.post("/training/reset")
+def reset_training():
+    with get_db() as c:
+        c.execute("DELETE FROM interaction_events")
+        c.execute("DELETE FROM learned_weights")
+    return RedirectResponse("/settings?msg=" + quote_plus("Learned agent training data reset to baseline."), status_code=303)
 
 @app.post("/shortlist/{job_id}")
 def shortlist(job_id: str):
@@ -582,64 +940,26 @@ def shortlist(job_id: str):
 
 @app.post("/scan")
 async def scan():
-    jobs = await fetch_jobs()
-    inserted = 0
     with get_db() as c:
         p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        visa_terms = [
-            "visa sponsorship", "sponsorship available", "work permit", "relocation support",
-            "visa support", "visa provided", "tier 2", "blue card", "sponsorship"
-        ]
-        housing_terms = [
-            "accommodation provided", "housing allowance", "relocation package", "temporary housing",
-            "relocation bonus", "relocation assistance", "flight allowance"
-        ]
-        now_iso = datetime.now(timezone.utc).isoformat()
-        for j in jobs:
-            if not j["url"] or not j["title"]:
-                continue
-            jid = hashlib.sha256(j["url"].encode()).hexdigest()[:24]
-            txt = (j["title"] + " " + j["description"]).lower()
-            score = score_job(j, p)
-            visa_ev = evidence(txt, visa_terms)
-            housing_ev = evidence(txt, housing_terms)
-            
-            try:
-                c.execute("""INSERT OR IGNORE INTO jobs(id,title,company,location,url,source,description,visa_evidence,housing_evidence,score,status,created_at)
-                             VALUES(?,?,?,?,?,?,?,?,?,?,'new',?)""",
-                          (jid, j["title"], j["company"], j["location"], j["url"], j["source"],
-                           j["description"], visa_ev, housing_ev, score, now_iso))
-                if c.total_changes > 0:
-                    inserted += 1
-            except Exception:
-                pass
-
-    msg = f"Discovery scan complete! Found {len(jobs)} total vacancies, added {inserted} new roles." if len(jobs) > 0 else "Scan completed. External feeds did not return new postings at this time."
-    return RedirectResponse("/?msg=" + quote_plus(msg), status_code=303)
+        result = await run_jury_deliberation_workflow(c, dict(p))
+    
+    count = result.get("crowned_count", 0)
+    return RedirectResponse(f"/?msg=" + quote_plus(f"Worker sweep & Jury deliberation complete! Crowned {count} Daily Selection roles."), status_code=303)
 
 @app.post("/rescore")
-def rescore():
-    with get_db() as c:
-        count = rescore_all_jobs_sync(c)
-    return RedirectResponse("/?msg=" + quote_plus(f"Successfully re-scored {count} vacancies!"), status_code=303)
-
-@app.post("/seed")
-def seed_curated():
+async def rescore():
     with get_db() as c:
         p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        added = 0
-        for j in SEED_JOBS:
-            jid = hashlib.sha256(j["url"].encode()).hexdigest()[:24]
-            score = score_job(j, p)
-            c.execute("""INSERT OR IGNORE INTO jobs
-                         (id,title,company,location,url,source,description,visa_evidence,housing_evidence,score,status,created_at)
-                         VALUES(?,?,?,?,?,?,?,?,?,?,'new',?)""",
-                      (jid, j["title"], j["company"], j["location"], j["url"], j["source"],
-                       j["description"], j["visa_evidence"], j["housing_evidence"], score, now_iso))
-            if c.total_changes > 0:
-                added += 1
-    return RedirectResponse("/?msg=" + quote_plus(f"Loaded {added} curated international vacancies!"), status_code=303)
+        await run_jury_deliberation_workflow(c, dict(p))
+    return RedirectResponse("/jury?msg=" + quote_plus("All vacancies re-deliberated and re-scored by the Supreme Jury!"), status_code=303)
+
+@app.post("/seed")
+async def seed_curated():
+    with get_db() as c:
+        p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        await run_jury_deliberation_workflow(c, dict(p))
+    return RedirectResponse("/?msg=" + quote_plus("Curated roles synchronized and reviewed by the Supreme Jury!"), status_code=303)
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings(msg: str = ""):
@@ -647,6 +967,7 @@ def settings(msg: str = ""):
         total = c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
         sources = c.execute("SELECT source, COUNT(*) n FROM jobs GROUP BY source").fetchall()
         source_summary = ", ".join(f"{r['source']} ({r['n']})" for r in sources) if sources else "None currently cached"
+        training_info = get_training_profile(c)
 
     flash_banner = f"<div class='notice'>{esc(msg)}</div>" if msg else ""
 
@@ -654,38 +975,70 @@ def settings(msg: str = ""):
     {flash_banner}
     <div class='sectionhead'>
       <div>
-        <p class='eyebrow'>CONFIGURATION & INTEGRATIONS</p>
-        <h1>Agent Settings & Automation</h1>
+        <p class='eyebrow'>SYSTEM ORCHESTRATION</p>
+        <h1>Agent Architecture & Settings</h1>
       </div>
     </div>
     
+    <div class='panel' style='background:#fcfaff; border-color:#e3d2fc;'>
+      <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;'>
+        <div>
+          <span class='pill' style='background:#f3eaff; color:#6225b5; font-weight:800; font-size:11px;'>BEHAVIORAL REINFORCEMENT LEARNING</span>
+          <h3 style='margin:8px 0 4px;'>Continuous Agent Training & Click Tracking</h3>
+          <p style='color:#584a6b; margin:0; font-size:14px;'>Agents and Workers dynamically train on your clicks, shortlists, and application choices via persistent session cookies. Status: <b>{esc(training_info['stage'])}</b> ({training_info['total_events']} events logged).</p>
+        </div>
+        <form method='post' action='/training/reset' onsubmit='return confirm("Reset learned agent memory back to initial calibration?");'>
+          <button type='submit' class='btn-subtle btn-sm' style='color:#b3261e; border-color:#f2b8b5;'>Reset Agent Memory</button>
+        </form>
+      </div>
+      <div style='display:flex; gap:12px; margin-top:16px; flex-wrap:wrap;'>
+        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#6225b5;'>{training_info['clicks']}</strong>
+          <small style='display:block; color:#777;'>Vacancy Clicks</small>
+        </div>
+        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#6225b5;'>{training_info['shortlists']}</strong>
+          <small style='display:block; color:#777;'>Shortlists Learned</small>
+        </div>
+        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#6225b5;'>{training_info['applies']}</strong>
+          <small style='display:block; color:#777;'>Applied Decisions</small>
+        </div>
+        <div style='background:#fff; border:1px solid #e3d2fc; padding:12px 18px; border-radius:12px; min-width:120px;'>
+          <strong style='font-size:20px; color:#6225b5;'>{training_info['dismisses']}</strong>
+          <small style='display:block; color:#777;'>Dismissed Penalties</small>
+        </div>
+      </div>
+    </div>
+
     <div class='panel'>
-      <h3>Discovery Operations</h3>
-      <p>Trigger on-demand discovery sweeps across configured international job feeds, or re-run candidate profile matching algorithms across your saved pipeline.</p>
+      <h3>Multi-Agent Court Controls</h3>
+      <p>Initiate worker scout sweeps, re-convene the Sub-Agent debates, or synchronize verified employer pipelines.</p>
       <div style='display:flex; gap:12px; flex-wrap:wrap; margin-top:16px;'>
+        <form method='post' action='/convene-jury'>
+          <button type='submit' class='btn btn-gold'>⚖️ Convene Supreme Jury & Re-Debate</button>
+        </form>
         <form method='post' action='/scan'>
-          <button type='submit' class='primary'>✦ Run Live Discovery Scan</button>
+          <button type='submit' class='primary'>✦ Run Worker Scout Sweep</button>
         </form>
         <form method='post' action='/rescore'>
-          <button type='submit' class='btn btn-secondary'>Re-score All Vacancies</button>
-        </form>
-        <form method='post' action='/seed'>
-          <button type='submit' class='btn btn-secondary'>Load Curated International Roles</button>
+          <button type='submit' class='btn btn-secondary'>Re-Score All Vacancies</button>
         </form>
       </div>
     </div>
 
     <div class='panel'>
-      <h3>Configured Job Feeds</h3>
-      <p><b>Active Sources:</b> {esc(source_summary)}</p>
-      <p><b>Connected Endpoints:</b> Arbeitnow Public Board API, Remotive Remote API, Direct Curated Feed.</p>
-      <p><b>Next planned integrations:</b> Greenhouse ATS, Lever ATS, LinkedIn Search Scrapers, Workday Direct Integrations.</p>
+      <h3>Agent Hierarchy Overview</h3>
+      <p><b>Level 3 Workers:</b> Arbeitnow Scout, Remotive Scout, Direct Employer ATS Scout.</p>
+      <p><b>Level 2 Sub-Agents:</b> Software & Systems Screener (💻), Quality & Operations Specialist (🎯), Visa & Relocation Advocate (🌍).</p>
+      <p><b>Level 1 Supreme Jury:</b> Deliberation Arbiter (⚖️) issuing daily verdicts and assigning daily picks.</p>
+      <p><b>Active Vacancies Cache:</b> {esc(source_summary)} (Total: {total})</p>
     </div>
 
     <div class='panel'>
-      <h3>Safety & Guardrails</h3>
-      <p><b>Review & Consent:</b> The agent never submits external applications, accepts terms, or shares confidential credentials automatically. All submissions require human verification.</p>
-      <p><b>Evidence Verification:</b> Visa sponsorship and accommodation indications are extracted via contextual keyword signals. Always verify specific terms on the employer's official job description page before applying.</p>
+      <h3>Automation & Governance</h3>
+      <p><b>Human-in-the-Loop:</b> The agent system never submits applications autonomously or shares confidential identity files. Applications are curated for your manual review and approval.</p>
+      <p><b>Immigration Vetting:</b> Visa sponsorship evidence is cross-examined by the Visa & Relocation Advocate before the Jury awards daily selection honors.</p>
     </div>
     """, active_nav="settings")
 
@@ -693,4 +1046,11 @@ def settings(msg: str = ""):
 def health():
     with get_db() as c:
         count = c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    return {"ok": True, "service": "adeena-job-agent", "jobs_count": count}
+        picks = c.execute("SELECT COUNT(*) FROM jobs WHERE is_daily_pick=1").fetchone()[0]
+    return {
+        "ok": True,
+        "service": "adeena-job-agent",
+        "agent_architecture": "hierarchical-multi-agent-jury",
+        "jobs_count": count,
+        "daily_picks_count": picks
+    }

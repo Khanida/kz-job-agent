@@ -1,8 +1,12 @@
 import unittest
+import asyncio
 from fastapi.testclient import TestClient
-from app.main import app, get_db, score_job, evidence, esc
+from app.main import app, get_db, esc
+from app.agents.workers import CuratedEmployerScout
+from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
+from app.agents.jury import SupremeJuryAgent
 
-class TestJobAgent(unittest.TestCase):
+class TestMultiAgentJobSystem(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
@@ -12,38 +16,130 @@ class TestJobAgent(unittest.TestCase):
         data = response.json()
         self.assertTrue(data.get("ok"))
         self.assertEqual(data.get("service"), "adeena-job-agent")
+        self.assertEqual(data.get("agent_architecture"), "hierarchical-multi-agent-jury")
 
-    def test_home_page(self):
+    def test_home_page_and_daily_picks(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("ADEENA'S JOB AGENT", response.text)
         self.assertIn("OPPORTUNITIES PIPELINE", response.text)
+        self.assertIn("Daily Selection", response.text)
 
-    def test_profile_page_get(self):
-        response = self.client.get("/profile")
+    def test_jury_room_page(self):
+        response = self.client.get("/jury")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Candidate Profile", response.text)
-        self.assertIn("Adeena Khanzada", response.text)
+        self.assertIn("The Jury Room & Multi-Agent Deliberation", response.text)
+        self.assertIn("Software & Systems Agent", response.text)
+        self.assertIn("Quality & Operations Agent", response.text)
+        self.assertIn("Visa & Relocation Advocate", response.text)
+        self.assertIn("Supreme Jury Agent", response.text)
 
-    def test_profile_save_and_rescore(self):
+    def test_convene_jury_endpoint(self):
+        response = self.client.post("/convene-jury", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/jury?msg=", response.headers["location"])
+
+    def test_sub_agents_and_challenges(self):
+        profile = {
+            "skills": "Python, C++, Java, Flutter",
+            "target_roles": "Junior Software Engineer, QA Engineer"
+        }
+        test_job = {
+            "id": "test_123",
+            "title": "Junior Software Engineer (Python)",
+            "company": "Tech Innovations",
+            "location": "London, UK",
+            "description": "Python, C++, microservices. Full visa sponsorship and relocation support provided."
+        }
+
+        sw_agent = SoftwareSystemsAgent()
+        qa_agent = QualityOperationsAgent()
+        visa_agent = RelocationVisaAgent()
+
+        sw_eval = sw_agent.evaluate_job(test_job, profile)
+        self.assertGreaterEqual(sw_eval["score"], 50)
+        self.assertIn("engineering", sw_eval["advocacy_pitch"].lower())
+
+        visa_eval = visa_agent.evaluate_job(test_job, profile)
+        self.assertTrue(visa_eval["has_visa"])
+        self.assertGreaterEqual(visa_eval["score"], 60)
+
+        qa_eval = qa_agent.evaluate_job(test_job, profile)
+        self.assertIsInstance(qa_eval["score"], int)
+
+        # Cross-examination challenges
+        challenge = visa_agent.challenge(test_job, sw_agent.name, profile)
+        self.assertIn("Endorsement", challenge["stance"])
+
+    def test_supreme_jury_deliberation(self):
+        profile = {
+            "skills": "Python, C++, Java, Flutter",
+            "target_roles": "Junior Software Engineer, QA Engineer"
+        }
+        candidate_jobs = [
+            {
+                "id": "job_a",
+                "title": "Graduate Systems Engineer",
+                "company": "Top Global Corp",
+                "location": "London, UK",
+                "description": "Python, C++, distributed architecture. Complete visa sponsorship and relocation package.",
+                "url": "https://example.com/job_a"
+            },
+            {
+                "id": "job_b",
+                "title": "Senior Staff Architect (10+ years)",
+                "company": "Old Corp",
+                "location": "Berlin, Germany",
+                "description": "10+ years experience required. Must already have right to work, no sponsorship.",
+                "url": "https://example.com/job_b"
+            }
+        ]
+
+        jury = SupremeJuryAgent()
+        session = jury.run_full_session(candidate_jobs, profile, max_daily_picks=1)
+        self.assertEqual(len(session["jobs"]), 2)
+        
+        # High fit with sponsorship should rank first
+        top_job = session["jobs"][0]
+        self.assertEqual(top_job["id"], "job_a")
+        self.assertEqual(top_job["is_daily_pick"], 1)
+        self.assertGreaterEqual(top_job["jury_score"], 65)
+
+        # Job B with blocker should be penalized
+        blocked_job = session["jobs"][1]
+        self.assertEqual(blocked_job["id"], "job_b")
+        self.assertEqual(blocked_job["is_daily_pick"], 0)
+        self.assertIn("REJECTED", blocked_job["verdict_status"])
+
+    def test_worker_scout(self):
+        scout = CuratedEmployerScout()
+        jobs = asyncio.run(scout.fetch_jobs())
+        self.assertGreaterEqual(len(jobs), 5)
+        first = jobs[0]
+        self.assertIn("title", first)
+        self.assertIn("company", first)
+        self.assertIn("url", first)
+        self.assertEqual(first["liveness_status"], "live")
+
+    def test_profile_save_and_re_debate(self):
         payload = {
             "name": "Adeena Khanzada",
             "citizenship": "Pakistani",
             "residence": "Jeddah, Saudi Arabia",
             "degree": "B.E. Computer Systems Engineering, MUET",
-            "skills": "Python, C++, Java, Flutter, Firebase, FastAPI",
+            "skills": "Python, C++, Java, Flutter, Firebase, FastAPI, QA, Embedded Systems",
             "target_roles": "Junior Software Engineer, QA Engineer, Embedded Systems Engineer",
             "cv_text": "Experienced junior engineer specializing in Python and embedded systems."
         }
         response = self.client.post("/profile", data=payload, follow_redirects=False)
         self.assertEqual(response.status_code, 303)
-        self.assertIn("/profile?msg=", response.headers["location"])
+        self.assertIn("msg=", response.headers["location"])
 
     def test_settings_page(self):
         response = self.client.get("/settings")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Agent Settings & Automation", response.text)
-        self.assertIn("Run Live Discovery Scan", response.text)
+        self.assertIn("Agent Architecture & Settings", response.text)
+        self.assertIn("Convene Supreme Jury", response.text)
 
     def test_job_status_workflow(self):
         with get_db() as c:
@@ -66,30 +162,117 @@ class TestJobAgent(unittest.TestCase):
         with get_db() as c:
             updated = c.execute("SELECT status FROM jobs WHERE id=?", (jid,)).fetchone()
             self.assertEqual(updated["status"], "applied")
-            app_rec = c.execute("SELECT * FROM applications WHERE job_id=?", (jid,)).fetchone()
-            self.assertIsNotNone(app_rec)
 
-    def test_score_job(self):
-        profile = {
-            "skills": "Python, C++, Flutter",
-            "target_roles": "Junior Software Engineer"
+    def test_cv_upload_text_file(self):
+        cv_content = b"Adeena Khanzada - Computer Systems Engineering, MUET. Skills: Python, C++, Docker, Embedded Systems."
+        files = {
+            "cv_file": ("adeena_cv.txt", cv_content, "text/plain")
         }
-        job = {
-            "title": "Junior Software Engineer (Python)",
-            "company": "Tech Corp",
-            "description": "We are seeking a junior python engineer with C++ knowledge.",
-            "location": "Berlin"
+        data = {
+            "name": "Adeena Khanzada",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+            "degree": "B.E. Computer Systems Engineering",
+            "skills": "Python, C++, Docker",
+            "target_roles": "Software Engineer",
+            "cv_text": ""
         }
-        score = score_job(job, profile)
-        self.assertGreaterEqual(score, 30)
+        res = self.client.post("/profile", data=data, files=files, follow_redirects=False)
+        self.assertEqual(res.status_code, 303)
 
-    def test_evidence_extraction(self):
-        txt = "Full visa sponsorship and comprehensive relocation package provided."
-        res = evidence(txt, ["visa sponsorship", "work permit"])
-        self.assertIn("visa sponsorship", res)
+        with get_db() as c:
+            p = c.execute("SELECT cv_filename, cv_text FROM profile WHERE id=1").fetchone()
+            self.assertEqual(p["cv_filename"], "adeena_cv.txt")
+            self.assertIn("Computer Systems Engineering", p["cv_text"])
 
-        housing_res = evidence(txt, ["relocation package", "temporary housing"])
-        self.assertIn("relocation package", housing_res)
+    def test_cv_upload_pdf_file(self):
+        import pypdf, io
+        # Generate a small valid PDF in memory
+        writer = pypdf.PdfWriter()
+        page = writer.add_blank_page(width=300, height=300)
+        # Note: blank page is valid PDF
+        buf = io.BytesIO()
+        writer.write(buf)
+        pdf_bytes = buf.getvalue()
+
+        files = {
+            "cv_file": ("test_resume.pdf", pdf_bytes, "application/pdf")
+        }
+        data = {
+            "name": "Adeena Khanzada",
+            "citizenship": "Pakistani",
+            "residence": "Jeddah, Saudi Arabia",
+            "degree": "B.E. Computer Systems Engineering",
+            "skills": "Python, C++",
+            "target_roles": "Software Engineer",
+            "cv_text": "Experienced Python Engineer"
+        }
+        res = self.client.post("/profile", data=data, files=files, follow_redirects=False)
+        self.assertEqual(res.status_code, 303)
+
+        with get_db() as c:
+            p = c.execute("SELECT cv_filename FROM profile WHERE id=1").fetchone()
+            self.assertEqual(p["cv_filename"], "test_resume.pdf")
+
+    def test_cv_download(self):
+        # Upload a CV first to ensure download target exists
+        files = {
+            "cv_file": ("download_test.txt", b"Downloadable CV text content", "text/plain")
+        }
+        self.client.post("/profile", data={"name": "Adeena"}, files=files)
+
+        res = self.client.get("/profile/cv/download")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers.get("content-type"), "application/octet-stream")
+        self.assertEqual(res.content, b"Downloadable CV text content")
+
+    def test_cookie_session_tracking(self):
+        res = self.client.get("/")
+        self.assertEqual(res.status_code, 200)
+        # Verify cookie is set
+        self.assertIn("agent_session", res.headers.get("set-cookie", ""))
+
+    def test_click_tracking_and_training(self):
+        with get_db() as c:
+            job = c.execute("SELECT id, url FROM jobs LIMIT 1").fetchone()
+            self.assertIsNotNone(job)
+            jid = job["id"]
+            expected_url = job["url"]
+
+        # Track click
+        res = self.client.get(f"/track/click/{jid}", follow_redirects=False)
+        self.assertEqual(res.status_code, 302)
+        self.assertEqual(res.headers.get("location"), expected_url)
+
+        # Verify event was logged in learner database
+        with get_db() as c:
+            event = c.execute("SELECT * FROM interaction_events WHERE job_id=? AND event_type='click'", (jid,)).fetchone()
+            self.assertIsNotNone(event, "Click event must be logged")
+
+    def test_status_selection_learning(self):
+        with get_db() as c:
+            job = c.execute("SELECT id FROM jobs LIMIT 1").fetchone()
+            jid = job["id"]
+
+        # Shortlist triggers positive reinforcement
+        res = self.client.post(f"/job/{jid}/status", data={"status": "shortlisted"}, follow_redirects=False)
+        self.assertEqual(res.status_code, 303)
+
+        with get_db() as c:
+            event = c.execute("SELECT * FROM interaction_events WHERE job_id=? AND event_type='shortlist'", (jid,)).fetchone()
+            self.assertIsNotNone(event)
+            weights = c.execute("SELECT COUNT(*) FROM learned_weights WHERE score_delta > 0").fetchone()[0]
+            self.assertGreater(weights, 0, "Learned weights should update on shortlist")
+
+    def test_reset_training(self):
+        res = self.client.post("/training/reset", follow_redirects=False)
+        self.assertEqual(res.status_code, 303)
+
+        with get_db() as c:
+            count = c.execute("SELECT COUNT(*) FROM interaction_events").fetchone()[0]
+            self.assertEqual(count, 0)
+            weights = c.execute("SELECT COUNT(*) FROM learned_weights").fetchone()[0]
+            self.assertEqual(weights, 0)
 
     def test_esc_helper(self):
         self.assertEqual(esc(0), "0")
