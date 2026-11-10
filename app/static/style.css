@@ -606,6 +606,7 @@ button:hover, .btn:hover {
   margin-bottom: 14px;
 }
 .debate-feed {
+  min-width: 0;
   background: #fff8fb;
   border: 1px solid #eedbe3;
   border-radius: 14px;
@@ -617,10 +618,12 @@ button:hover, .btn:hover {
 }
 .debate-speech {
   display: flex;
+  min-width: 0;
   gap: 12px;
   align-items: flex-start;
 }
 .debate-avatar {
+  flex: 0 0 auto;
   font-size: 20px;
   background: #fff;
   border: 1px solid #d7afbf;
@@ -628,6 +631,7 @@ button:hover, .btn:hover {
   padding: 6px;
 }
 .speech-bubble {
+  min-width: 0;
   background: #fff;
   border: 1px solid #d8e6f4;
   border-radius: 12px;
@@ -635,6 +639,7 @@ button:hover, .btn:hover {
   font-size: 13px;
   line-height: 1.5;
   flex: 1;
+  overflow-wrap: anywhere;
 }
 .speech-author {
   font-weight: 750;
@@ -642,6 +647,8 @@ button:hover, .btn:hover {
   color: var(--primary);
   margin-bottom: 4px;
   display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   justify-content: space-between;
 }
 .verdict-box {
@@ -880,6 +887,21 @@ button:hover, .btn:hover {
   margin-top: 0;
   font-size: 19px;
 }
+.auth-hero {
+  padding: 28px 32px;
+  margin-bottom: 16px;
+}
+.auth-hero h1 {
+  font-size: clamp(28px, 4vw, 40px);
+  margin: 8px 0 10px;
+}
+.auth-hero p {
+  margin-bottom: 0;
+}
+.auth-panel {
+  max-width: 540px;
+  margin: 0 auto 24px;
+}
 
 label {
   display: block;
@@ -1005,6 +1027,26 @@ footer {
   .hero {
     padding: 28px 22px;
   }
+  .sectionhead {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .sectionhead > form {
+    width: 100%;
+  }
+  .sectionhead > form button {
+    width: 100%;
+    white-space: normal;
+  }
+  .sectionhead > a {
+    align-self: flex-start;
+  }
+  .auth-hero {
+    padding: 22px 20px;
+  }
+  .auth-panel {
+    padding: 24px 20px;
+  }
   .flow-stages {
     grid-template-columns: 1fr;
     gap: 8px;
@@ -1027,8 +1069,17 @@ footer {
     flex-direction: column;
     align-items: stretch;
   }
+  .tabs {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .search-box {
+    width: 100%;
+  }
   .search-box input {
     width: 100%;
+    min-width: 0;
+    flex: 1 1 0;
   }
 }
 

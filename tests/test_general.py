@@ -56,9 +56,10 @@ class TestGeneralJobApp(unittest.TestCase):
         self.assertIn("Find a job that fits", dashboard.text)
         self.assertIn("Jordan Lee", dashboard.text)
         self.assertIn("Jury Room", dashboard.text)
+        self.assertIn("Set up my job preferences", dashboard.text)
+        self.assertNotIn("action='/refresh' data-job-refresh", dashboard.text)
         self.assertNotIn("Scouts search", dashboard.text)
-        self.assertIn("data-job-refresh", dashboard.text)
-        self.assertIn("Your recommendations will appear here", dashboard.text)
+        self.assertNotIn("Recommended jobs", dashboard.text)
 
     def test_accounts_have_separate_profiles_and_job_lists(self):
         self.assertEqual(self.register(self.client, "Jordan Lee", "jordan@example.com").status_code, 303)
@@ -66,11 +67,14 @@ class TestGeneralJobApp(unittest.TestCase):
         with general.get_user_db(jordan_id) as conn:
             conn.execute(
                 """INSERT INTO jobs (id, title, company, location, url, source, description,
-                   status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   score, jury_score, is_daily_pick, authenticity_status, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 ("private-job", "Private role", "Jordan's company", "Remote",
-                 "https://example.com/job", "Test", "", "new", "2026-11-10"),
+                 "https://example.com/job", "Test", "", 80, 80, 1, "likely_official",
+                 "new", "2026-11-10"),
             )
 
+        self.assertIn("Private role", self.client.get("/dashboard").text)
         other_client = TestClient(general.app)
         response = self.register(other_client, "Taylor Chen", "taylor@example.com")
         self.assertEqual(response.status_code, 303)

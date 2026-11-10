@@ -1232,7 +1232,12 @@ def update_job_status(job_id: str, request: Request, status: str = Form(...)):
     with get_db() as c:
         job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if job and status in ["shortlisted", "applied", "dismissed"]:
-            record_interaction(c, sid, job_id, status, dict(job))
+            event_type = {
+                "shortlisted": "shortlist",
+                "applied": "apply",
+                "dismissed": "dismiss",
+            }[status]
+            record_interaction(c, sid, job_id, event_type, dict(job))
 
         c.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
         if status == "applied":

@@ -869,6 +869,10 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
     user, csrf = user_context(request)
     with get_user_db(user["id"]) as conn:
         profile = conn.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        profile_ready = any(
+            (profile[field] or "").strip()
+            for field in ("target_roles", "skills", "cv_text")
+        )
         counts = {
             row["status"]: row["count"]
             for row in conn.execute(
@@ -921,46 +925,64 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
     job_cards = "".join(render_job(job, csrf) for job in jobs)
     if not job_cards:
         job_cards = "<div class='empty-state'><h3>No matching jobs yet</h3><p>Try a different search or refresh your job matches.</p></div>"
-    return HTMLResponse(page_layout(f"""
-      {flash}
-      <section class='hero'>
-        <p class='eyebrow'>YOUR NEXT OPPORTUNITY</p>
-        <h1>Find a job that fits <em>{esc(profile['name'])}</em></h1>
-        <p>Recommendations use the skills, roles, location, and experience you choose. Review every posting and apply directly with the employer.</p>
-        <div class='hero-actions'>
+    show_results = profile_ready or bool(picks or jobs or counts)
+    if profile_ready:
+        hero_actions = f"""
           <form method='post' action='/refresh' data-job-refresh>
             <input type='hidden' name='csrf_token' value='{esc(csrf)}'>
             <button type='submit' class='btn btn-gold'>Find and refresh jobs</button>
             <span class='sr-only' data-refresh-status aria-live='polite'></span>
           </form>
           <a href='/profile' class='btn btn-secondary'>Update my profile</a>
-        </div>
-        <p class='refresh-note'>Last refreshed: {esc(latest['session_date'] if latest else 'Not yet refreshed')}</p>
+        """
+        refresh_note = f"Last refreshed: {esc(latest['session_date'] if latest else 'Not yet refreshed')}"
+    else:
+        hero_actions = "<a href='/profile' class='btn btn-gold'>Set up my job preferences</a>"
+        refresh_note = "Add a target role, skill, or resume details to start your search."
+
+    if show_results:
+        recommendations_html = f"""
+          <section class='daily-section'>
+            <div class='daily-header'><div><p class='eyebrow'>PERSONALIZED FOR YOU</p><h2>Recommended jobs</h2></div></div>
+            <div class='daily-grid'>{pick_html}</div>
+          </section>
+        """
+        activity_html = f"""
+          <section class='stats'>
+            <div><strong>{sum(counts.values())}</strong><small>Jobs in your list</small></div>
+            <div><strong>{counts.get('shortlisted', 0)}</strong><small>Saved</small></div>
+            <div><strong>{counts.get('applied', 0)}</strong><small>Applied</small></div>
+          </section>
+          <div class='filter-bar'>
+            <div class='tabs'>
+              <a class='tab {'active' if status == 'all' else ''}' href='/dashboard'>All</a>
+              <a class='tab {'active' if status == 'new' else ''}' href='/dashboard?status=new'>New</a>
+              <a class='tab {'active' if status == 'shortlisted' else ''}' href='/dashboard?status=shortlisted'>Saved</a>
+              <a class='tab {'active' if status == 'applied' else ''}' href='/dashboard?status=applied'>Applied</a>
+            </div>
+            <form class='search-box' method='get' action='/dashboard'>
+              <input type='hidden' name='status' value='{esc(status)}'>
+              <input name='q' value='{esc(q)}' placeholder='Search jobs, companies, or locations'>
+              <button type='submit' class='btn-secondary btn-sm'>Search</button>
+            </form>
+          </div>
+          <div class='sectionhead'><div><p class='eyebrow'>JOB LISTINGS</p><h2>All matching jobs</h2></div></div>
+          <div class='jobs'>{job_cards}</div>
+        """
+    else:
+        recommendations_html = ""
+        activity_html = ""
+    return HTMLResponse(page_layout(f"""
+      {flash}
+      <section class='hero'>
+        <p class='eyebrow'>YOUR NEXT OPPORTUNITY</p>
+        <h1>Find a job that fits <em>{esc(profile['name'])}</em></h1>
+        <p>Recommendations use the skills, roles, location, and experience you choose. Review every posting and apply directly with the employer.</p>
+        <div class='hero-actions'>{hero_actions}</div>
+        <p class='refresh-note'>{refresh_note}</p>
       </section>
-      <section class='daily-section'>
-        <div class='daily-header'><div><p class='eyebrow'>PERSONALIZED FOR YOU</p><h2>Recommended jobs</h2></div></div>
-        <div class='daily-grid'>{pick_html}</div>
-      </section>
-      <section class='stats'>
-        <div><strong>{sum(counts.values())}</strong><small>Jobs in your list</small></div>
-        <div><strong>{counts.get('shortlisted', 0)}</strong><small>Saved</small></div>
-        <div><strong>{counts.get('applied', 0)}</strong><small>Applied</small></div>
-      </section>
-      <div class='filter-bar'>
-        <div class='tabs'>
-          <a class='tab {'active' if status == 'all' else ''}' href='/dashboard'>All</a>
-          <a class='tab {'active' if status == 'new' else ''}' href='/dashboard?status=new'>New</a>
-          <a class='tab {'active' if status == 'shortlisted' else ''}' href='/dashboard?status=shortlisted'>Saved</a>
-          <a class='tab {'active' if status == 'applied' else ''}' href='/dashboard?status=applied'>Applied</a>
-        </div>
-        <form class='search-box' method='get' action='/dashboard'>
-          <input type='hidden' name='status' value='{esc(status)}'>
-          <input name='q' value='{esc(q)}' placeholder='Search jobs, companies, or locations'>
-          <button type='submit' class='btn-secondary btn-sm'>Search</button>
-        </form>
-      </div>
-      <div class='sectionhead'><div><p class='eyebrow'>JOB LISTINGS</p><h2>All matching jobs</h2></div></div>
-      <div class='jobs'>{job_cards}</div>
+      {recommendations_html}
+      {activity_html}
     """, csrf, "dashboard"))
 
 

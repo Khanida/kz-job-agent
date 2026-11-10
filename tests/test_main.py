@@ -969,6 +969,11 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         with get_db() as c:
             updated = c.execute("SELECT status FROM jobs WHERE id=?", (jid,)).fetchone()
             self.assertEqual(updated["status"], "shortlisted")
+            event = c.execute(
+                "SELECT event_type FROM interaction_events WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (jid,),
+            ).fetchone()
+            self.assertEqual(event["event_type"], "shortlist")
 
         # Mark applied
         res = self.client.post(f"/job/{jid}/status", data={"status": "applied"}, follow_redirects=False)
@@ -977,6 +982,20 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         with get_db() as c:
             updated = c.execute("SELECT status FROM jobs WHERE id=?", (jid,)).fetchone()
             self.assertEqual(updated["status"], "applied")
+            event = c.execute(
+                "SELECT event_type FROM interaction_events WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (jid,),
+            ).fetchone()
+            self.assertEqual(event["event_type"], "apply")
+
+        res = self.client.post(f"/job/{jid}/status", data={"status": "dismissed"}, follow_redirects=False)
+        self.assertEqual(res.status_code, 303)
+        with get_db() as c:
+            event = c.execute(
+                "SELECT event_type FROM interaction_events WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (jid,),
+            ).fetchone()
+            self.assertEqual(event["event_type"], "dismiss")
 
     def test_cv_upload_text_file(self):
         cv_content = b"Adeena Khanzada - Computer Systems Engineering, MUET. Skills: Python, C++, Docker, Embedded Systems."
