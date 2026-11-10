@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: job-scout
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.general:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: GENERAL_AUTH_DATABASE_PATH
+        value: /var/data/general_auth.db
+      - key: GENERAL_USER_DATA_DIR
+        value: /var/data/user_data
+    disk:
+      name: job-scout-data
+      mountPath: /var/data
+      sizeGB: 1

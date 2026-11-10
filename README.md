@@ -37,10 +37,10 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Render Ready**: Blueprint config with persistent disk support.
 
 ## Important limitations
-This is a starter, not a finished autonomous applicant. The current scanner is a discovery prototype. Public feeds are incomplete, keyword matching is not semantic, and visa/housing evidence is not verified. The application does **not** submit applications, create accounts, answer legal questions, or send personal data to employers.
+This is a starter, not a finished autonomous applicant. The current scanner is a discovery prototype. Public feeds are incomplete, keyword matching is not semantic, and visa/housing evidence is not verified. Neither app submits applications, answers legal questions, or sends personal data to employers. The original `app.main` app does not create accounts.
 CV skills and role suggestions use local keyword heuristics, not an external AI service; review the suggested roles before relying on them.
 
-Before production:
+The limitations below apply to the original `app.main` entry point unless noted otherwise. `app.general` adds local account login and per-user data files, but it does not include email verification, password recovery, account administration, or managed database services. Before inviting real users or deploying publicly:
 1. Add authentication and per-user authorization.
 2. Replace SQLite with managed PostgreSQL (Supabase or Render Postgres).
 3. Add employer ATS integrations (Greenhouse/Lever) and source-specific terms/rate limits.
@@ -48,6 +48,8 @@ Before production:
 5. Add encrypted CV storage and secrets management.
 6. Move scheduled work to a dedicated worker if the web service is scaled to multiple instances.
 7. Add an application preparation/review queue. Submission should require explicit approval for each employer/application until a safe, accurate authorization model is established.
+
+For `app.general`, account login and data separation are implemented for a single-host self-hosted deployment; use HTTPS, persistent storage, backups, and a production security review before public launch.
 
 ## Run locally
 ```bash
@@ -58,14 +60,24 @@ uvicorn app.main:app --reload
 ```
 Open http://127.0.0.1:8000
 
+## Run the general multi-user app
+The separate `app.general` entry point supports account registration and keeps each person's profile, job list, and learned preferences in a separate SQLite database. It starts with a blank profile rather than Adeena's personal details. It does not modify the original `app.main` app or its `jobs.db`.
+
+```bash
+uvicorn app.general:app --reload --port 8001
+```
+Open http://127.0.0.1:8001, create an account, add your job-search preferences, and use **Find and refresh jobs** to discover postings. Applications are completed directly on employer websites.
+
+Set `GENERAL_AUTH_DATABASE_PATH` to choose where account credentials and sessions are stored, and `GENERAL_USER_DATA_DIR` to choose the directory containing per-account job-search databases. Keep both on persistent storage. The general app is a self-hosted starting point, not a fully managed public service: deploy behind HTTPS, configure backups and secrets, and review the production-readiness limitations below before inviting users.
+
 ## Run tests
 ```bash
-python -m unittest tests/test_main.py
+python -m unittest tests/test_general.py
 ```
+The legacy `tests/test_main.py` suite operates on `DATABASE_PATH` and includes a test that resets learned training signals. Do not run that suite against a database containing data you want to keep.
 
 ## Deploy on Render
-Push this repository to GitHub, then create a Render Blueprint from `render.yaml`.
-The Blueprint provisions a web service and persistent disk. For production, connect PostgreSQL and configure secrets in Render's dashboard.
+Push this repository to GitHub, then create a Render Blueprint from `render.yaml` for the original app, or `render.general.yaml` for the account-based Job Scout. Each Blueprint provisions a web service and persistent disk. For production, connect PostgreSQL and configure secrets in Render's dashboard.
 
 ## Environment
 - `DATABASE_PATH`: SQLite path; defaults to `jobs.db` in project root.
