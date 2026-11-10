@@ -55,6 +55,9 @@ class TestGeneralJobApp(unittest.TestCase):
         dashboard = self.client.get("/dashboard")
         self.assertIn("Find a job that fits", dashboard.text)
         self.assertIn("Jordan Lee", dashboard.text)
+        self.assertIn("Jury Room", dashboard.text)
+        self.assertNotIn("Scouts search", dashboard.text)
+        self.assertIn("data-job-refresh", dashboard.text)
         self.assertIn("Your recommendations will appear here", dashboard.text)
 
     def test_accounts_have_separate_profiles_and_job_lists(self):
@@ -182,7 +185,7 @@ class TestGeneralJobApp(unittest.TestCase):
                 job["liveness_status"] = "live"
                 job["authenticity_status"] = "verified"
 
-        with patch.object(general, "run_discovery_workers", new=AsyncMock(return_value=discovered)):
+        with patch.object(general, "run_general_discovery_workers", new=AsyncMock(return_value=discovered)):
             with patch.object(general, "verify_listing_availability", new=AsyncMock(side_effect=mark_live)):
                 with general.get_user_db("test-user") as conn:
                     result = asyncio.run(general.run_general_refresh(conn, profile))
@@ -195,6 +198,107 @@ class TestGeneralJobApp(unittest.TestCase):
         self.assertEqual(by_id["analyst-job"]["is_daily_pick"], 1)
         self.assertGreater(by_id["analyst-job"]["jury_score"], by_id["backend-job"]["jury_score"])
         self.assertEqual(by_id["backend-job"]["jury_score"], 0)
+
+    def test_general_scouts_use_independent_public_feeds(self):
+        class FakeScout:
+            def __init__(self, jobs):
+                self.jobs = jobs
+                self.name = "Fake public scout"
+
+            async def fetch_jobs(self):
+                return self.jobs
+
+        with patch.object(general, "PublicJobBoardScout", return_value=FakeScout([
+            {"id": "board-1", "url": "https://example.com/1"},
+            {"id": "shared", "url": "https://example.com/shared"},
+        ])):
+            with patch.object(general, "RemoteOpportunityScout", return_value=FakeScout([
+                {"id": "remote-1", "url": "https://example.com/2"},
+                {"id": "duplicate", "url": "https://example.com/shared"},
+            ])):
+                jobs = asyncio.run(general.run_general_discovery_workers())
+
+        self.assertEqual([job["id"] for job in jobs], ["board-1", "shared", "remote-1"])
+        self.assertEqual(jobs[0]["worker_scout"], "Fake public scout")
+        self.assertEqual(jobs[2]["worker_scout"], "Fake public scout")
+
+    def test_jury_room_shows_saved_debate_and_reviewer_panel(self):
+        self.register(self.client, "Jordan Lee", "jordan@example.com")
+        user_id = self.user_id("jordan@example.com")
+        discovered = [{
+            "id": "jury-job", "title": "Data Analyst", "company": "Example Co",
+            "location": "Toronto", "url": "https://example.com/data-role",
+            "source": "Board", "worker_scout": "International Job Board Scout",
+            "description": "SQL and Excel experience preferred.",
+        }]
+
+        async def mark_live(jobs):
+            for job in jobs:
+                job["liveness_status"] = "live"
+                job["authenticity_status"] = "likely_official"
+                job["authenticity_evidence"] = "Test domain signal."
+
+        with patch.object(general, "run_general_discovery_workers", new=AsyncMock(return_value=discovered)):
+            with patch.object(general, "verify_listing_availability", new=AsyncMock(side_effect=mark_live)):
+                with general.get_user_db(user_id) as conn:
+                    profile = dict(conn.execute("SELECT * FROM profile WHERE id=1").fetchone())
+                    profile["target_roles"] = "Data Analyst"
+                    profile["skills"] = "SQL, Excel"
+                    profile["residence"] = "Toronto"
+                    result = asyncio.run(general.run_general_refresh(conn, profile))
+
+        self.assertEqual(result["crowned_count"], 1)
+        response = self.client.get("/jury")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Jury Room", response.text)
+        self.assertIn("data-job-workflow", response.text)
+        self.assertIn("Scouts search", response.text)
+        self.assertIn("Reviewers compare", response.text)
+        self.assertIn("The Jury ranks", response.text)
+        self.assertIn("International Job Board Scout", response.text)
+        self.assertIn("Remote Opportunity Scout", response.text)
+        self.assertIn("Role &amp; Skills Advocate", response.text)
+        self.assertIn("Experience &amp; Preferences Reviewer", response.text)
+        self.assertIn("Posting Quality Reviewer", response.text)
+        self.assertIn("Independent Cross-Examiner", response.text)
+        self.assertIn("POSSIBLE MATCH — REVIEW DETAILS", response.text)
+        self.assertIn("data analyst", response.text.lower())
+
+    def test_jury_room_requires_login_and_debates_are_account_private(self):
+        guest = TestClient(general.app)
+        response = guest.get("/jury", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/login")
+
+        self.register(self.client, "Jordan Lee", "jordan@example.com")
+        jordan_id = self.user_id("jordan@example.com")
+        with general.get_user_db(jordan_id) as conn:
+            conn.execute(
+                """INSERT INTO jobs (id, title, company, status, jury_score, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("private-debate", "Private Analyst Role", "Private Co", "new", 80, "2026-11-10"),
+            )
+            conn.execute(
+                "UPDATE jobs SET worker_scout='Private Scout' WHERE id='private-debate'"
+            )
+            conn.execute(
+                """INSERT INTO deliberations (id, session_date, summary, top_picks_count, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                ("private-round", "2026-11-10", "Private debate summary", 0, "2026-11-10T00:00:00Z"),
+            )
+            conn.execute(
+                """INSERT INTO jury_verdicts
+                   (deliberation_id, job_id, verdict, consensus_score, recommendation, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("private-round", "private-debate", "PRIVATE VERDICT", 80, "Private recommendation", "2026-11-10"),
+            )
+        self.assertIn("PRIVATE VERDICT", self.client.get("/jury").text)
+
+        other_client = TestClient(general.app)
+        self.register(other_client, "Taylor Chen", "taylor@example.com")
+        response = other_client.get("/jury")
+        self.assertNotIn("Private Analyst Role", response.text)
+        self.assertNotIn("Private debate summary", response.text)
 
 
 if __name__ == "__main__":

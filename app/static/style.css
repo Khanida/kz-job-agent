@@ -1051,3 +1051,133 @@ footer {
     transition-duration: .01ms !important;
   }
 }
+
+.job-workflow {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 26px 30px;
+  margin: 28px 0;
+  box-shadow: var(--shadow);
+}
+.job-workflow-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.job-workflow-heading h2 {
+  margin: 0;
+  font-size: 22px;
+}
+.job-workflow-heading .eyebrow {
+  margin: 0 0 5px;
+}
+.job-workflow-stages {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+}
+.job-workflow-stage {
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  min-height: 142px;
+  padding: 17px 12px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: #fffafd;
+  opacity: .7;
+  transform: translateY(0);
+  transition: opacity .3s ease, transform .3s ease, border-color .3s ease, box-shadow .3s ease;
+}
+.job-workflow-stage.is-active {
+  opacity: 1;
+  transform: translateY(-4px);
+  border-color: var(--accent);
+  box-shadow: 0 8px 22px rgba(83, 102, 236, .12);
+}
+.job-workflow-stage.is-complete {
+  opacity: .9;
+  border-color: var(--blue-border);
+}
+.job-workflow-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  color: var(--primary);
+  background: var(--primary-light);
+  border-radius: 14px;
+  font-size: 27px;
+  font-weight: 800;
+}
+.job-workflow-stage strong {
+  font-size: 14px;
+}
+.job-workflow-stage small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.job-workflow-arrow {
+  color: var(--accent);
+  font-size: 22px;
+  font-weight: 800;
+}
+.job-workflow-status {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 16px 0 8px;
+}
+.job-workflow > a {
+  font-size: 13px;
+  font-weight: 700;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+@media (max-width: 600px) {
+  .job-workflow {
+    padding: 22px 18px;
+  }
+  .job-workflow-heading {
+    flex-direction: column;
+  }
+  .job-workflow-stages {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .job-workflow-stage {
+    min-height: 0;
+    grid-template-columns: 48px 1fr;
+    grid-template-rows: auto auto;
+    justify-items: start;
+    text-align: left;
+    column-gap: 12px;
+    padding: 12px;
+  }
+  .job-workflow-icon {
+    grid-row: 1 / span 2;
+  }
+  .job-workflow-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .job-workflow-stage {
+    transition: none;
+    transform: none;
+  }
+}

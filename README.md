@@ -61,12 +61,12 @@ uvicorn app.main:app --reload
 Open http://127.0.0.1:8000
 
 ## Run the general multi-user app
-The separate `app.general` entry point supports account registration and keeps each person's profile, job list, and learned preferences in a separate SQLite database. It starts with a blank profile rather than Adeena's personal details. It does not modify the original `app.main` app or its `jobs.db`.
+The separate `app.general` entry point supports account registration and keeps each person's profile, job list, jury discussions, and learned preferences in a separate SQLite database. Its Jury Room uses independent public job-board and remote-job scouts, then runs role/skills, experience/preferences, posting-quality, and cross-examination reviews. It starts with a blank profile rather than Adeena's personal details, and does not use the original app's candidate-specific curated listings or hiring assumptions. It does not modify the original `app.main` app or its `jobs.db`.
 
 ```bash
 uvicorn app.general:app --reload --port 8001
 ```
-Open http://127.0.0.1:8001, create an account, add your job-search preferences, and use **Find and refresh jobs** to discover postings. Applications are completed directly on employer websites.
+Open http://127.0.0.1:8001, create an account, add your job-search preferences, and use **Find and refresh jobs** to discover postings. Open **Jury Room** to see which scouts returned listings, the reviewers' notes, cross-examination, and each verdict. Applications are completed directly on employer websites.
 
 Set `GENERAL_AUTH_DATABASE_PATH` to choose where account credentials and sessions are stored, and `GENERAL_USER_DATA_DIR` to choose the directory containing per-account job-search databases. Keep both on persistent storage. The general app is a self-hosted starting point, not a fully managed public service: deploy behind HTTPS, configure backups and secrets, and review the production-readiness limitations below before inviting users.
 

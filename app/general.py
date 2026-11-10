@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import html
+import logging
 import os
 from pathlib import Path
 import re
@@ -21,7 +22,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.agents.cv_analyzer import analyze_cv
 from app.agents.learner import init_learner_db, record_interaction
-from app.agents.orchestrator import run_discovery_workers, verify_listing_availability
+from app.agents.orchestrator import verify_listing_availability
+from app.agents.workers import ArbeitnowScout, RemotiveScout
 
 APP_DIR = Path(__file__).resolve().parent
 AUTH_DB_PATH = Path(os.getenv("GENERAL_AUTH_DATABASE_PATH", str(APP_DIR.parent / "general_auth.db")))
@@ -31,6 +33,7 @@ CSRF_COOKIE = "job_agent_csrf"
 SESSION_MAX_AGE = 60 * 60 * 24 * 14
 PASSWORD_ITERATIONS = 310_000
 refresh_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
 
 
 def esc(value: object) -> str:
@@ -91,6 +94,7 @@ def get_user_db(user_id: str):
           liveness_status TEXT DEFAULT 'unverified', liveness_checked_at TEXT,
           authenticity_status TEXT DEFAULT 'unverified', authenticity_evidence TEXT,
           posted_date TEXT DEFAULT 'Recently posted', status TEXT DEFAULT 'new',
+          worker_scout TEXT DEFAULT '',
           created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS profile (
@@ -116,6 +120,11 @@ def get_user_db(user_id: str):
           recommendation TEXT, is_selected INTEGER DEFAULT 0, created_at TEXT
         );
         """)
+        job_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "worker_scout" not in job_columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN worker_scout TEXT DEFAULT ''")
         conn.execute(
             """INSERT OR IGNORE INTO profile
                (id, name, citizenship, residence, degree, skills, target_roles,
@@ -203,6 +212,7 @@ def page_layout(body: str, csrf_token: str = "", active_nav: str = "", show_nav:
     if show_nav:
         nav_items = [
             ("/dashboard", "Job matches", "dashboard"),
+            ("/jury", "Jury Room", "jury"),
             ("/profile", "My profile", "profile"),
         ]
         nav = "".join(
@@ -230,6 +240,51 @@ def page_layout(body: str, csrf_token: str = "", active_nav: str = "", show_nav:
   </header>
   <main>{body}</main>
   <footer>Your profile and job-search activity are stored separately from other accounts.</footer>
+  <script>
+    (() => {{
+      const workflow = document.querySelector("[data-job-workflow]");
+      if (workflow) {{
+        const stages = [...workflow.querySelectorAll("[data-job-stage]")];
+        const status = workflow.querySelector("[data-job-workflow-status]");
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const messages = [
+          "Scouts look across public job boards.",
+          "Reviewers compare roles with your profile.",
+          "The Jury weighs the evidence and ranks matches."
+        ];
+        let active = 0;
+        const advance = () => {{
+          stages.forEach((stage, index) => {{
+            stage.classList.toggle("is-active", index === active);
+            stage.classList.toggle("is-complete", index < active);
+          }});
+          status.textContent = messages[active];
+          active = (active + 1) % stages.length;
+        }};
+        if (stages.length && status) {{
+          if (reducedMotion) {{
+            status.textContent = "Scouts find postings, reviewers check fit, and the Jury ranks your matches.";
+          }} else {{
+            advance();
+            window.setInterval(advance, 2600);
+          }}
+        }}
+      }}
+
+      const refreshForm = document.querySelector("[data-job-refresh]");
+      if (refreshForm) {{
+        refreshForm.addEventListener("submit", () => {{
+          const button = refreshForm.querySelector("button[type='submit']");
+          const status = refreshForm.querySelector("[data-refresh-status]");
+          if (button) {{
+            button.disabled = true;
+            button.textContent = "Searching and reviewing jobs…";
+          }}
+          if (status) status.textContent = "Searching job feeds and preparing your Jury review. This may take a little while.";
+        }});
+      }}
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -314,8 +369,241 @@ def score_job_for_profile(job: dict, profile: dict) -> int:
     return max(0, min(100, score))
 
 
+class PublicJobBoardScout:
+    """Collects general job-board listings, without candidate-specific curated jobs."""
+
+    name = "International Job Board Scout"
+
+    async def fetch_jobs(self) -> list[dict]:
+        return await ArbeitnowScout().fetch_jobs()
+
+
+class RemoteOpportunityScout:
+    """Collects remote listings from a separate public job feed."""
+
+    name = "Remote Opportunity Scout"
+
+    async def fetch_jobs(self) -> list[dict]:
+        return await RemotiveScout().fetch_jobs()
+
+
+async def run_general_discovery_workers() -> list[dict]:
+    scouts = [PublicJobBoardScout(), RemoteOpportunityScout()]
+    results = await asyncio.gather(
+        *(scout.fetch_jobs() for scout in scouts), return_exceptions=True
+    )
+    jobs_by_url: dict[str, dict] = {}
+    for scout, result in zip(scouts, results):
+        if isinstance(result, BaseException):
+            logger.warning("%s failed to fetch job listings: %s", scout.name, result)
+            continue
+        for job in result:
+            url = job.get("url", "")
+            if url and url not in jobs_by_url:
+                job["worker_scout"] = getattr(scout, "name", scout.__class__.__name__)
+                jobs_by_url[url] = job
+    return list(jobs_by_url.values())
+
+
+class RoleAlignmentAgent:
+    name = "Role & Skills Advocate"
+    role = "Profile Alignment Reviewer"
+    avatar = "🎯"
+
+    def evaluate(self, job: dict, profile: dict) -> dict:
+        score = score_job_for_profile(job, profile)
+        if score:
+            evidence = (
+                f"Profile overlap produced a {score}/100 match from the roles, skills, "
+                "experience preference, and location entered in the profile."
+            )
+        else:
+            evidence = (
+                "No clear match was found for the profile's target roles or skills, "
+                "or the posting matches an excluded skill or role type."
+            )
+        return {"score": score, "evidence": evidence}
+
+
+class ExperiencePreferencesAgent:
+    name = "Experience & Preferences Reviewer"
+    role = "Seniority and Exclusions Check"
+    avatar = "🧭"
+
+    def evaluate(self, job: dict, profile: dict) -> dict:
+        title = (job.get("title") or "").lower()
+        description = (job.get("description") or "").lower()
+        if profile.get("experience_level") == "entry-level":
+            seniority_terms = ("senior", "staff", "principal", "lead", "director", "head of")
+            years = re.search(r"\b(?:[8-9]|\d{2,})\+?\s+years?\b", description)
+            if any(re.search(r"\b" + re.escape(term) + r"\b", title) for term in seniority_terms):
+                return {"score": 0, "eligible": False, "evidence": "The title indicates a seniority level outside the entry-level preference."}
+            if years:
+                return {"score": 0, "eligible": False, "evidence": f"The listing asks for {years.group(0)}, which conflicts with the entry-level preference."}
+
+        exclusions = [
+            term.strip().lower()
+            for term in (profile.get("excluded_job_terms") or "").split(",")
+            if term.strip()
+        ]
+        excluded_skills = [
+            term.strip().lower()
+            for term in (profile.get("excluded_skills") or "").split(",")
+            if term.strip()
+        ]
+        for term in exclusions:
+            if term in title:
+                return {"score": 0, "eligible": False, "evidence": f"The title matches the excluded role type “{term}”."}
+        for term in excluded_skills:
+            if re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", f"{title} {description}"):
+                return {"score": 0, "eligible": False, "evidence": f"The listing mentions the excluded skill “{term}”."}
+        return {
+            "score": 85,
+            "eligible": True,
+            "evidence": "No conflict was found with the experience level or exclusions in the profile.",
+        }
+
+
+class PostingQualityAgent:
+    name = "Posting Quality Reviewer"
+    role = "Availability and Employer-Link Evidence"
+    avatar = "🔎"
+
+    def evaluate(self, job: dict) -> dict:
+        liveness = job.get("liveness_status", "unverified")
+        authenticity = job.get("authenticity_status", "unverified")
+        if liveness != "live":
+            return {
+                "score": 0,
+                "eligible": False,
+                "evidence": f"The posting availability is {liveness.replace('_', ' ')}; it cannot be recommended as a confirmed opening.",
+            }
+        if authenticity == "suspicious":
+            return {
+                "score": 0,
+                "eligible": False,
+                "evidence": "The posting URL has a suspicious destination and should not be used.",
+            }
+        if authenticity == "likely_official":
+            return {
+                "score": 95,
+                "eligible": True,
+                "evidence": "The posting is reachable and its domain has a positive employer/recruiting-platform signal; this is not proof of authenticity.",
+            }
+        return {
+            "score": 65,
+            "eligible": True,
+            "evidence": "The posting is reachable, but the employer link is unverified. Confirm it on the employer's official careers page before sharing personal information.",
+        }
+
+
+class GeneralSupremeJury:
+    name = "Job Match Jury"
+    role = "Evidence-Based Recommendation Panel"
+
+    def __init__(self):
+        self.agents = (
+            RoleAlignmentAgent(),
+            ExperiencePreferencesAgent(),
+            PostingQualityAgent(),
+        )
+
+    def deliberate(self, job: dict, profile: dict) -> dict:
+        role_fit, preferences, posting = (
+            self.agents[0].evaluate(job, profile),
+            self.agents[1].evaluate(job, profile),
+            self.agents[2].evaluate(job),
+        )
+        arguments = [
+            {
+                "agent_name": self.agents[0].name,
+                "agent_role": self.agents[0].role,
+                "argument_type": "role_fit",
+                "statement": role_fit["evidence"],
+                "score": role_fit["score"],
+            },
+            {
+                "agent_name": self.agents[1].name,
+                "agent_role": self.agents[1].role,
+                "argument_type": "candidate_preferences",
+                "statement": preferences["evidence"],
+                "score": preferences["score"],
+            },
+            {
+                "agent_name": self.agents[2].name,
+                "agent_role": self.agents[2].role,
+                "argument_type": "posting_quality",
+                "statement": posting["evidence"],
+                "score": posting["score"],
+            },
+        ]
+        if not preferences["eligible"]:
+            cross_exam = (
+                "The profile-preference objection takes priority over a title or skill overlap: "
+                + preferences["evidence"]
+            )
+        elif not posting["eligible"]:
+            cross_exam = (
+                "A role match cannot override posting-quality concerns: "
+                + posting["evidence"]
+            )
+        elif role_fit["score"]:
+            cross_exam = (
+                "The match is based on text signals, not a full assessment of qualifications. "
+                "Check required credentials, responsibilities, location, and employer details."
+            )
+        else:
+            cross_exam = (
+                "The role-fit reviewer found no configured role or skill overlap. "
+                "If your profile is incomplete, update it before ruling this job out."
+            )
+        arguments.append({
+            "agent_name": "Independent Cross-Examiner",
+            "agent_role": "Challenge Round",
+            "argument_type": "cross_examination",
+            "statement": cross_exam,
+            "score": min(role_fit["score"], preferences["score"], posting["score"]),
+        })
+        selected = role_fit["score"] > 0 and preferences["eligible"] and posting["eligible"]
+        consensus = (
+            round(role_fit["score"] * 0.55 + preferences["score"] * 0.25 + posting["score"] * 0.20)
+            if selected else 0
+        )
+        if not posting["eligible"]:
+            verdict = "NOT RECOMMENDED — POSTING NOT VERIFIED"
+        elif not preferences["eligible"]:
+            verdict = "NOT RECOMMENDED — PROFILE PREFERENCE MISMATCH"
+        elif not role_fit["score"]:
+            verdict = "NOT RECOMMENDED — LOW ROLE MATCH"
+        elif consensus >= 70:
+            verdict = "STRONG MATCH"
+        else:
+            verdict = "POSSIBLE MATCH — REVIEW DETAILS"
+        arguments.append({
+            "agent_name": self.name,
+            "agent_role": self.role,
+            "argument_type": "jury_verdict",
+            "statement": (
+                f"{verdict}. The panel weighs role alignment (55%), profile preferences (25%), "
+                "and posting evidence (20%). The score is a guide, not a guarantee of hiring eligibility."
+            ),
+            "score": consensus,
+        })
+        return {
+            "score": consensus,
+            "selected": selected,
+            "verdict": verdict,
+            "recommendation": (
+                "Review the full requirements, confirm the opening on the employer's careers page, "
+                "and apply directly if it is still a fit."
+                if selected else "Use the reviewer notes to decide whether to update your profile or skip this listing."
+            ),
+            "arguments": arguments,
+        }
+
+
 async def run_general_refresh(conn: sqlite3.Connection, profile: dict) -> dict:
-    discovered = await run_discovery_workers()
+    discovered = await run_general_discovery_workers()
     existing_rows = conn.execute("SELECT * FROM jobs WHERE status!='dismissed'").fetchall()
     existing_by_url = {row["url"]: dict(row) for row in existing_rows if row["url"]}
     candidates: list[dict] = []
@@ -334,11 +622,17 @@ async def run_general_refresh(conn: sqlite3.Connection, profile: dict) -> dict:
             candidates.append(previous)
 
     await verify_listing_availability(candidates)
+    jury = GeneralSupremeJury()
     eligible = []
     for job in candidates:
-        job["jury_score"] = score_job_for_profile(job, profile)
+        decision = jury.deliberate(job, profile)
+        job["jury_score"] = decision["score"]
         job["score"] = job["jury_score"]
-        if job.get("liveness_status") == "live" and job.get("authenticity_status") != "suspicious":
+        job["is_daily_pick"] = int(decision["selected"])
+        job["jury_verdict"] = decision["verdict"]
+        job["jury_recommendation"] = decision["recommendation"]
+        job["jury_arguments"] = decision["arguments"]
+        if decision["selected"]:
             eligible.append(job)
     eligible.sort(key=lambda job: job["jury_score"], reverse=True)
     ranked_recommendations = [job for job in eligible if job["jury_score"] > 0][:5]
@@ -357,8 +651,8 @@ async def run_general_refresh(conn: sqlite3.Connection, profile: dict) -> dict:
                  id, title, company, location, url, source, description, visa_evidence,
                  housing_evidence, score, jury_score, is_daily_pick, advocate_agent,
                  jury_verdict, liveness_status, liveness_checked_at, authenticity_status,
-                 authenticity_evidence, posted_date, status, created_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 authenticity_evidence, posted_date, status, created_at, worker_scout
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, company=excluded.company, location=excluded.location,
                  url=excluded.url, source=excluded.source, description=excluded.description,
@@ -369,16 +663,37 @@ async def run_general_refresh(conn: sqlite3.Connection, profile: dict) -> dict:
                  liveness_checked_at=excluded.liveness_checked_at,
                  authenticity_status=excluded.authenticity_status,
                  authenticity_evidence=excluded.authenticity_evidence,
-                 posted_date=excluded.posted_date""",
+                 posted_date=excluded.posted_date, worker_scout=excluded.worker_scout""",
             (
                 job_id, job.get("title", ""), job.get("company", ""), job.get("location", ""),
                 job.get("url", ""), job.get("source", "Scout"), job.get("description", ""),
                 job.get("visa_evidence", "Not verified"), job.get("housing_evidence", "Not verified"),
-                job["score"], job["jury_score"], is_pick, "", "Profile match",
+                job["score"], job["jury_score"], is_pick, "", job["jury_verdict"],
                 job.get("liveness_status", "unverified"), job.get("liveness_checked_at"),
                 job.get("authenticity_status", "unverified"),
                 job.get("authenticity_evidence", "Not verified"),
                 job.get("posted_date", "Recently posted"), job.get("status", "new"), now,
+                job.get("worker_scout", ""),
+            ),
+        )
+        for argument in job["jury_arguments"]:
+            conn.execute(
+                """INSERT INTO agent_arguments
+                   (deliberation_id, job_id, agent_name, agent_role, argument_type,
+                    statement, score, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id, job_id, argument["agent_name"], argument["agent_role"],
+                    argument["argument_type"], argument["statement"], argument["score"], now,
+                ),
+            )
+        conn.execute(
+            """INSERT INTO jury_verdicts
+               (deliberation_id, job_id, verdict, consensus_score, recommendation,
+                is_selected, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id, job_id, job["jury_verdict"], job["jury_score"],
+                job["jury_recommendation"], is_pick, now,
             ),
         )
 
@@ -592,6 +907,7 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
           <p><span class='score-badge'>{job['jury_score'] or job['score'] or 0}/100 match</span>
              Posting: {esc(job['liveness_status'] or 'unverified').replace('_', ' ').title()} ·
              Employer: {esc(job['authenticity_status'] or 'unverified').replace('_', ' ').title()}</p>
+          <a href='/jury#{esc(job['id'])}'>Read Jury notes →</a>
           <div class='job-footer'>{job_link(job['id'], job['liveness_status'])}
             {status_action(job['id'], job['status'], csrf)}</div>
         </article>"""
@@ -612,9 +928,10 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
         <h1>Find a job that fits <em>{esc(profile['name'])}</em></h1>
         <p>Recommendations use the skills, roles, location, and experience you choose. Review every posting and apply directly with the employer.</p>
         <div class='hero-actions'>
-          <form method='post' action='/refresh'>
+          <form method='post' action='/refresh' data-job-refresh>
             <input type='hidden' name='csrf_token' value='{esc(csrf)}'>
             <button type='submit' class='btn btn-gold'>Find and refresh jobs</button>
+            <span class='sr-only' data-refresh-status aria-live='polite'></span>
           </form>
           <a href='/profile' class='btn btn-secondary'>Update my profile</a>
         </div>
@@ -645,6 +962,178 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
       <div class='sectionhead'><div><p class='eyebrow'>JOB LISTINGS</p><h2>All matching jobs</h2></div></div>
       <div class='jobs'>{job_cards}</div>
     """, csrf, "dashboard"))
+
+
+@app.get("/jury", response_class=HTMLResponse)
+def jury_room(request: Request):
+    user, csrf = user_context(request)
+    with get_user_db(user["id"]) as conn:
+        round_row = conn.execute(
+            "SELECT * FROM deliberations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if round_row:
+            session_id = round_row["id"]
+            rows = conn.execute(
+                """SELECT j.*, v.verdict AS final_verdict, v.consensus_score,
+                          v.recommendation, v.is_selected
+                   FROM jury_verdicts v
+                   JOIN jobs j ON j.id=v.job_id
+                   WHERE v.deliberation_id=?
+                   ORDER BY v.is_selected DESC, v.consensus_score DESC, j.title COLLATE NOCASE""",
+                (session_id,),
+            ).fetchall()
+            arguments = conn.execute(
+                """SELECT * FROM agent_arguments WHERE deliberation_id=?
+                   ORDER BY id ASC""",
+                (session_id,),
+            ).fetchall()
+            sources = conn.execute(
+                """SELECT j.source, j.worker_scout, COUNT(*) AS count
+                   FROM jury_verdicts v JOIN jobs j ON j.id=v.job_id
+                   WHERE v.deliberation_id=?
+                   GROUP BY j.source, j.worker_scout
+                   ORDER BY count DESC""",
+                (session_id,),
+            ).fetchall()
+        else:
+            rows = []
+            arguments = []
+            sources = []
+
+    args_by_job: dict[str, list[sqlite3.Row]] = {}
+    for argument in arguments:
+        args_by_job.setdefault(argument["job_id"], []).append(argument)
+
+    source_counts = {
+        source["worker_scout"]: source["count"]
+        for source in sources if source["worker_scout"]
+    }
+    source_summary = "".join(
+        f"<span class='pill'>{esc(name)}: {source_counts.get(name, 0)} listings</span>"
+        for name in (PublicJobBoardScout.name, RemoteOpportunityScout.name)
+    )
+    if not round_row:
+        source_summary += "<p class='muted'>No worker results yet. Add a target role or skill to your profile, then refresh job matches.</p>"
+
+    agent_cards = [
+        (RoleAlignmentAgent(), "Compares your chosen target roles and skills with each job description."),
+        (ExperiencePreferencesAgent(), "Checks your experience level and honors the exclusions you set."),
+        (PostingQualityAgent(), "Checks posting availability and reports whether the employer link is verified."),
+    ]
+    agent_html = "".join(
+        f"""<div class='agent-card'>
+          <div class='agent-card-header'><div class='agent-avatar'>{agent.avatar}</div>
+            <div><div class='agent-name'>{esc(agent.name)}</div>
+              <div class='agent-role'>{esc(agent.role)}</div></div></div>
+          <p class='agent-desc'>{esc(description)}</p>
+        </div>"""
+        for agent, description in agent_cards
+    )
+
+    debate_cards = []
+    for job in rows:
+        job_id = esc(job["id"])
+        speeches = "".join(
+            f"""<div class='debate-speech'>
+              <div class='debate-avatar'>{'⚖️' if argument['argument_type'] == 'jury_verdict' else '🧑‍💼'}</div>
+              <div class='speech-bubble'>
+                <div class='speech-author'><span>{esc(argument['agent_name'])}
+                  <small>({esc(argument['agent_role'])})</small></span>
+                  <span class='pill'>{esc(argument['argument_type'].replace('_', ' ').title())} · {argument['score']}/100</span>
+                </div>
+                <div>{esc(argument['statement'])}</div>
+              </div>
+            </div>"""
+            for argument in args_by_job.get(job["id"], [])
+        )
+        selected = job["is_selected"] == 1
+        debate_cards.append(f"""
+        <article class='deliberation-item general-deliberation' id='{job_id}'>
+          <div class='delib-header'>
+            <div>
+              <div class='pills'>
+                <span class='verdict-tag'>{'Recommended' if selected else 'Reviewed'}</span>
+                <span class='pill'>{esc(job['worker_scout'] or job['source'])}</span>
+                <span class='pill'>{esc(job['liveness_status'] or 'unverified').replace('_', ' ').title()}</span>
+                <span class='pill'>Employer {esc(job['authenticity_status'] or 'unverified').replace('_', ' ')}</span>
+              </div>
+              <h3>{esc(job['title'])}</h3>
+              <p class='company-loc'>{esc(job['company'])} · {esc(job['location'] or 'Location not listed')}</p>
+            </div>
+            <span class='score-badge'>{job['consensus_score'] or 0}/100 match</span>
+          </div>
+          <div class='debate-feed'>
+            <strong>Reviewer discussion</strong>
+            {speeches or '<p class="muted">No reviewer notes were recorded for this job.</p>'}
+          </div>
+          <div class='verdict-box'>
+            <div class='verdict-header'><span>JURY VERDICT</span><span>{esc(job['final_verdict'])}</span></div>
+            <p class='verdict-action'><b>Next step:</b> {esc(job['recommendation'])}</p>
+          </div>
+          <div class='job-footer'>{job_link(job['id'], job['liveness_status'])}
+            {status_action(job['id'], job['status'], csrf)}</div>
+        </article>""")
+
+    latest = ""
+    if round_row:
+        latest = f"""<section class='deliberation-box'>
+          <p class='eyebrow'>LATEST REVIEW · {esc(round_row['session_date'])}</p>
+          <p>{esc(round_row['summary'])}</p>
+          <p><b>{round_row['top_picks_count']} recommended</b> from {len(rows)} reviewed postings.</p>
+        </section>"""
+    else:
+        latest = """<section class='empty-state'>
+          <h2>No Jury review yet</h2>
+          <p>Complete your job-search profile, then refresh job matches. The worker scouts and review agents will create your first session.</p>
+          <a class='btn btn-secondary' href='/profile'>Set up my profile</a>
+        </section>"""
+
+    review_html = "".join(debate_cards) or ""
+    return HTMLResponse(page_layout(f"""
+      <section class='sectionhead'>
+        <div><p class='eyebrow'>YOUR JOB SEARCH REVIEW</p><h1>Jury Room</h1></div>
+        <a class='btn btn-secondary' href='/dashboard'>Back to job matches</a>
+      </section>
+      <p class='muted'>Independent reviewers explain role fit, profile preferences, and posting quality. Their scores are guidance—not a promise of eligibility or hiring.</p>
+      <section class='job-workflow' data-job-workflow aria-labelledby='job-workflow-heading'>
+        <div class='job-workflow-heading'>
+          <div><p class='eyebrow'>HOW MATCHES ARE MADE</p><h2 id='job-workflow-heading'>From job search to your shortlist</h2></div>
+          <span class='flow-live'><span></span> REVIEW PROCESS</span>
+        </div>
+        <div class='job-workflow-stages'>
+          <div class='job-workflow-stage' data-job-stage='0'>
+            <span class='job-workflow-icon' aria-hidden='true'>⌕</span>
+            <strong>Scouts search</strong>
+            <small>Look across public job boards</small>
+          </div>
+          <span class='job-workflow-arrow' aria-hidden='true'>→</span>
+          <div class='job-workflow-stage' data-job-stage='1'>
+            <span class='job-workflow-icon' aria-hidden='true'>◎</span>
+            <strong>Reviewers compare</strong>
+            <small>Check roles against your profile</small>
+          </div>
+          <span class='job-workflow-arrow' aria-hidden='true'>→</span>
+          <div class='job-workflow-stage' data-job-stage='2'>
+            <span class='job-workflow-icon' aria-hidden='true'>⚖</span>
+            <strong>The Jury ranks</strong>
+            <small>Weigh evidence and explain matches</small>
+          </div>
+        </div>
+        <p class='job-workflow-status' data-job-workflow-status aria-live='polite'>Scouts find postings, reviewers check fit, and the Jury ranks your matches.</p>
+      </section>
+      <section class='deliberation-box'>
+        <h2>Job scouts</h2>
+        <p>Each refresh checks independent public feeds. Candidate-specific curated listings are not used in this general app.</p>
+        <div class='pills'>{source_summary}</div>
+      </section>
+      <h2>Review panel</h2>
+      <div class='bench-grid'>{agent_html}</div>
+      {latest}
+      <section class='deliberation-box'>
+        <h2>Debates &amp; verdicts</h2>
+        {review_html or "<p class='muted'>Your posting-by-posting debate and verdicts will appear here after the first refresh.</p>"}
+      </section>
+    """, csrf, "jury"))
 
 
 def status_action(job_id: str, status: str, csrf: str) -> str:
@@ -682,6 +1171,7 @@ def render_job(job: sqlite3.Row, csrf: str) -> str:
       <h3>{esc(job['title'])}</h3>
       <p class='company-loc'>{esc(job['company'])} · {esc(job['location'] or 'Location not listed')}</p>
       <p>{esc((job['description'] or '')[:360])}</p>
+      <p><a href='/jury#{esc(job['id'])}'>Read Jury notes →</a></p>
       <div class='job-footer'>{job_link(job['id'], job['liveness_status'])}
         <div class='job-actions'>{actions}
           <form method='post' action='/job/{esc(job['id'])}/status'>

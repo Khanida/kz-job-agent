@@ -675,53 +675,6 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
       <p class='refresh-note'>Last selection: {esc(last_refresh)} UTC · Automatic refresh daily at midnight UTC</p>
     </section>
 
-    <section class='agent-flow' data-agent-flow aria-label='Daily job selection process'>
-      <div class='flow-heading'>
-        <div>
-          <p class='eyebrow'>TODAY’S SELECTION, IN MOTION</p>
-          <h2>Daily Selection: From job files to the Jury’s top five</h2>
-        </div>
-        <span class='flow-live'><span></span> DAILY REVIEW</span>
-      </div>
-      <div class='flow-stages'>
-        <span class='flow-delivery' aria-hidden='true'>📄</span>
-        <div class='flow-stage flow-scene-stage is-active' data-flow-stage='0'>
-          <div class='flow-cartoon flow-worker-cartoon' aria-hidden='true'>
-            <span class='flow-character'>🧑‍💼</span>
-            <span class='flow-character'>👩‍💼</span>
-            <span class='flow-cartoon-files'><i>▤</i><i>▤</i><i>▤</i></span>
-            <span class='flow-speech'>Found new jobs!</span>
-          </div>
-          <strong>Workers scout</strong>
-          <small>Collect files from job sites</small>
-        </div>
-        <span class='flow-arrow' aria-hidden='true'>→</span>
-        <div class='flow-stage flow-scene-stage' data-flow-stage='1'>
-          <div class='flow-cartoon flow-agent-cartoon' aria-hidden='true'>
-            <span class='flow-character'>💻</span>
-            <span class='flow-character'>🎯</span>
-            <span class='flow-character'>🌍</span>
-            <span class='flow-speech'>“Strong fit!”<br>“Check the link!”</span>
-          </div>
-          <strong>Sub-Agents debate</strong>
-          <small>Challenge, check, and pass finalists on</small>
-        </div>
-        <span class='flow-arrow' aria-hidden='true'>→</span>
-        <div class='flow-stage flow-scene-stage flow-jury' data-flow-stage='2'>
-          <div class='flow-cartoon flow-jury-cartoon' aria-hidden='true'>
-            <span class='flow-character'>👩‍⚖️</span>
-            <span class='flow-jury-scales'>⚖️</span>
-            <span class='flow-speech'>The top five!</span>
-          </div>
-          <strong>Jury decides</strong>
-          <small>Choose the best jobs to apply for today</small>
-          <span class='flow-top-five' aria-label='Five daily selections'>01&nbsp; 02&nbsp; 03&nbsp; 04&nbsp; 05</span>
-        </div>
-      </div>
-      <p class='flow-status' data-flow-status>Workers are collecting fresh job files…</p>
-      <p class='flow-footnote'>Your ranked selections appear below. Applications are always reviewed and submitted by you.</p>
-    </section>
-
     {daily_shelf_html}
 
     {training_banner_html}
@@ -923,6 +876,53 @@ def jury_room(msg: str = ""):
       </form>
     </div>
     <p class='muted'>Inspect the cross-examination between specialized Sub-Agents as they advocate for vacancies matching Adeena's CV, dispute constraints, and receive final decree from the Supreme Jury.</p>
+
+    <section class='agent-flow' data-agent-flow aria-label='Daily job selection process'>
+      <div class='flow-heading'>
+        <div>
+          <p class='eyebrow'>TODAY’S SELECTION, IN MOTION</p>
+          <h2>Daily Selection: From job files to the Jury’s top five</h2>
+        </div>
+        <span class='flow-live'><span></span> DAILY REVIEW</span>
+      </div>
+      <div class='flow-stages'>
+        <span class='flow-delivery' aria-hidden='true'>📄</span>
+        <div class='flow-stage flow-scene-stage is-active' data-flow-stage='0'>
+          <div class='flow-cartoon flow-worker-cartoon' aria-hidden='true'>
+            <span class='flow-character'>🧑‍💼</span>
+            <span class='flow-character'>👩‍💼</span>
+            <span class='flow-cartoon-files'><i>▤</i><i>▤</i><i>▤</i></span>
+            <span class='flow-speech'>Found new jobs!</span>
+          </div>
+          <strong>Workers scout</strong>
+          <small>Collect files from job sites</small>
+        </div>
+        <span class='flow-arrow' aria-hidden='true'>→</span>
+        <div class='flow-stage flow-scene-stage' data-flow-stage='1'>
+          <div class='flow-cartoon flow-agent-cartoon' aria-hidden='true'>
+            <span class='flow-character'>💻</span>
+            <span class='flow-character'>🎯</span>
+            <span class='flow-character'>🌍</span>
+            <span class='flow-speech'>“Strong fit!”<br>“Check the link!”</span>
+          </div>
+          <strong>Sub-Agents debate</strong>
+          <small>Challenge, check, and pass finalists on</small>
+        </div>
+        <span class='flow-arrow' aria-hidden='true'>→</span>
+        <div class='flow-stage flow-scene-stage flow-jury' data-flow-stage='2'>
+          <div class='flow-cartoon flow-jury-cartoon' aria-hidden='true'>
+            <span class='flow-character'>👩‍⚖️</span>
+            <span class='flow-jury-scales'>⚖️</span>
+            <span class='flow-speech'>The top five!</span>
+          </div>
+          <strong>Jury decides</strong>
+          <small>Choose the best jobs to apply for today</small>
+          <span class='flow-top-five' aria-label='Five daily selections'>01&nbsp; 02&nbsp; 03&nbsp; 04&nbsp; 05</span>
+        </div>
+      </div>
+      <p class='flow-status' data-flow-status>Workers are collecting fresh job files…</p>
+      <p class='flow-footnote'>Your ranked selections appear below. Applications are always reviewed and submitted by you.</p>
+    </section>
 
     <!-- Sub-Agent Bench Showcase -->
     <div class='bench-grid'>
