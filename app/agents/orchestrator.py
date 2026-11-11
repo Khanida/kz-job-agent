@@ -2,11 +2,14 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 import sqlite3
+import logging
 import httpx
 
 from app.agents.workers import ArbeitnowScout, RemotiveScout, CuratedEmployerScout, BaseWorker, HEADERS
 from app.agents.jury import SupremeJuryAgent
 from app.agents.learner import compute_learned_boost, init_learner_db
+
+logger = logging.getLogger(__name__)
 
 async def run_discovery_workers() -> List[Dict[str, Any]]:
     """Runs all Level-3 Worker Scouts concurrently to discover vacancies and verify liveness."""
@@ -21,13 +24,26 @@ async def run_discovery_workers() -> List[Dict[str, Any]]:
 
     all_jobs = []
     seen_urls = set()
-    for res in results:
-        if isinstance(res, list):
-            for job in res:
-                url = job.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_jobs.append(job)
+    for scout, result in zip(scouts, results):
+        if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result
+            logger.warning("%s failed to fetch job listings: %s", scout.name, result)
+            continue
+        if not isinstance(result, list):
+            logger.warning(
+                "%s returned an invalid result (%s); expected a list of jobs",
+                scout.name,
+                type(result).__name__,
+            )
+            continue
+
+        logger.info("%s returned %d job listings", scout.name, len(result))
+        for job in result:
+            url = job.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                all_jobs.append(job)
 
     return all_jobs
 

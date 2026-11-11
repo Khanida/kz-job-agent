@@ -2,7 +2,7 @@ import httpx
 import re
 from datetime import datetime, timezone
 import hashlib
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urlsplit
 
 HEADERS = {
@@ -166,45 +166,48 @@ class ArbeitnowScout(BaseWorker):
 
     async def fetch_jobs(self) -> List[Dict[str, Any]]:
         jobs = []
-        try:
-            async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=HEADERS) as client:
-                r = await client.get(self.API_URL)
-                if r.status_code == 200:
-                    data = r.json().get("data", [])
-                    now_ts = datetime.now(timezone.utc).timestamp()
-                    for j in data[:100]:
-                        raw_desc = j.get("description", "")
-                        clean_desc = re.sub(r"<[^>]+>", " ", raw_desc)
-                        tags = " ".join(j.get("tags", [])) if isinstance(j.get("tags"), list) else ""
-                        full_desc = f"{clean_desc} {tags}"[:8000]
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=HEADERS) as client:
+            response = await client.get(self.API_URL)
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ValueError("Arbeitnow returned an unexpected job-feed response")
 
-                        # Calculate recency
-                        created_at_ts = j.get("created_at")
-                        posted_str = "Recently posted"
-                        if isinstance(created_at_ts, (int, float)):
-                            days_ago = max(0, int((now_ts - created_at_ts) / 86400))
-                            posted_str = f"{days_ago}d ago" if days_ago > 0 else "Today"
+        now_ts = datetime.now(timezone.utc).timestamp()
+        for j in payload["data"][:100]:
+            if not isinstance(j, dict):
+                continue
+            raw_desc = j.get("description", "")
+            clean_desc = re.sub(r"<[^>]+>", " ", raw_desc) if isinstance(raw_desc, str) else ""
+            tags = " ".join(j.get("tags", [])) if isinstance(j.get("tags"), list) else ""
+            full_desc = f"{clean_desc} {tags}"[:8000]
 
-                        url = j.get("url", "").strip()
-                        title = j.get("title", "").strip()
-                        if not url or not title:
-                            continue
+            created_at_ts = j.get("created_at")
+            posted_str = "Recently posted"
+            if isinstance(created_at_ts, (int, float)):
+                days_ago = max(0, int((now_ts - created_at_ts) / 86400))
+                posted_str = f"{days_ago}d ago" if days_ago > 0 else "Today"
 
-                        jid = hashlib.sha256(url.encode()).hexdigest()[:24]
-                        jobs.append({
-                            "id": jid,
-                            "title": title,
-                            "company": j.get("company_name", "").strip() or "Hiring Company",
-                            "location": j.get("location", "").strip() or "Europe / Remote",
-                            "url": url,
-                            "source": self.source_name,
-                            "description": full_desc,
-                            "posted_date": posted_str,
-                            "liveness_status": "unverified",
-                            "worker_scout": self.name
-                        })
-        except Exception:
-            pass
+            url = j.get("url", "").strip() if isinstance(j.get("url"), str) else ""
+            title = j.get("title", "").strip() if isinstance(j.get("title"), str) else ""
+            if not url or not title:
+                continue
+
+            jid = hashlib.sha256(url.encode()).hexdigest()[:24]
+            company = j.get("company_name")
+            location = j.get("location")
+            jobs.append({
+                "id": jid,
+                "title": title,
+                "company": company.strip() if isinstance(company, str) and company.strip() else "Hiring Company",
+                "location": location.strip() if isinstance(location, str) and location.strip() else "Europe / Remote",
+                "url": url,
+                "source": self.source_name,
+                "description": full_desc,
+                "posted_date": posted_str,
+                "liveness_status": "unverified",
+                "worker_scout": self.name
+            })
         return jobs
 
 class RemotiveScout(BaseWorker):
@@ -214,50 +217,55 @@ class RemotiveScout(BaseWorker):
 
     async def fetch_jobs(self) -> List[Dict[str, Any]]:
         jobs = []
-        try:
-            async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=HEADERS) as client:
-                r = await client.get(self.API_URL)
-                if r.status_code == 200:
-                    raw_jobs = r.json().get("jobs", [])
-                    now = datetime.now(timezone.utc)
-                    for j in raw_jobs[:100]:
-                        raw_desc = j.get("description", "")
-                        clean_desc = re.sub(r"<[^>]+>", " ", raw_desc)
-                        tags = " ".join(j.get("tags", [])) if isinstance(j.get("tags"), list) else ""
-                        salary = f"Salary: {j.get('salary')}" if j.get("salary") else ""
-                        full_desc = f"{clean_desc} {tags} {salary}"[:8000]
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True, headers=HEADERS) as client:
+            response = await client.get(self.API_URL)
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
+            raise ValueError("Remotive returned an unexpected job-feed response")
 
-                        # Calculate recency from ISO date
-                        pub_date = j.get("publication_date")
-                        posted_str = "Recently posted"
-                        if pub_date:
-                            try:
-                                dt = datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
-                                days_ago = max(0, (now - dt).days)
-                                posted_str = f"{days_ago}d ago" if days_ago > 0 else "Today"
-                            except Exception:
-                                pass
+        now = datetime.now(timezone.utc)
+        for j in payload["jobs"][:100]:
+            if not isinstance(j, dict):
+                continue
+            raw_desc = j.get("description", "")
+            clean_desc = re.sub(r"<[^>]+>", " ", raw_desc) if isinstance(raw_desc, str) else ""
+            tags = " ".join(j.get("tags", [])) if isinstance(j.get("tags"), list) else ""
+            salary = f"Salary: {j.get('salary')}" if j.get("salary") else ""
+            full_desc = f"{clean_desc} {tags} {salary}"[:8000]
 
-                        url = j.get("url", "").strip()
-                        title = j.get("title", "").strip()
-                        if not url or not title:
-                            continue
+            pub_date = j.get("publication_date")
+            posted_str = "Recently posted"
+            if isinstance(pub_date, str) and pub_date:
+                try:
+                    dt = datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    days_ago = max(0, (now - dt).days)
+                    posted_str = f"{days_ago}d ago" if days_ago > 0 else "Today"
+                except ValueError:
+                    pass
 
-                        jid = hashlib.sha256(url.encode()).hexdigest()[:24]
-                        jobs.append({
-                            "id": jid,
-                            "title": title,
-                            "company": j.get("company_name", "").strip() or "Hiring Company",
-                            "location": j.get("candidate_required_location", "Worldwide Remote").strip(),
-                            "url": url,
-                            "source": self.source_name,
-                            "description": full_desc,
-                            "posted_date": posted_str,
-                            "liveness_status": "unverified",
-                            "worker_scout": self.name
-                        })
-        except Exception:
-            pass
+            url = j.get("url", "").strip() if isinstance(j.get("url"), str) else ""
+            title = j.get("title", "").strip() if isinstance(j.get("title"), str) else ""
+            if not url or not title:
+                continue
+
+            jid = hashlib.sha256(url.encode()).hexdigest()[:24]
+            company = j.get("company_name")
+            location = j.get("candidate_required_location")
+            jobs.append({
+                "id": jid,
+                "title": title,
+                "company": company.strip() if isinstance(company, str) and company.strip() else "Hiring Company",
+                "location": location.strip() if isinstance(location, str) and location.strip() else "Worldwide Remote",
+                "url": url,
+                "source": self.source_name,
+                "description": full_desc,
+                "posted_date": posted_str,
+                "liveness_status": "unverified",
+                "worker_scout": self.name
+            })
         return jobs
 
 class CuratedEmployerScout(BaseWorker):

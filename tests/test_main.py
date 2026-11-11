@@ -5,6 +5,7 @@ import json
 import sqlite3
 import zipfile
 import httpx
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app, extract_text_from_file, get_db, esc
@@ -13,8 +14,8 @@ from app.agents.cv_analyzer import (
     assess_candidate_constraints,
     score_cv_match,
 )
-from app.agents.workers import BaseWorker, CuratedEmployerScout
-from app.agents.orchestrator import run_jury_deliberation_workflow
+from app.agents.workers import ArbeitnowScout, BaseWorker, CuratedEmployerScout, RemotiveScout
+from app.agents.orchestrator import run_discovery_workers, run_jury_deliberation_workflow
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
 from app.agents.jury import SupremeJuryAgent
 from app.agents.learner import record_interaction, compute_learned_boost
@@ -764,6 +765,94 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("company", first)
         self.assertIn("url", first)
         self.assertEqual(first["liveness_status"], "unverified")
+
+    def test_api_scouts_raise_on_http_errors_instead_of_returning_empty_results(self):
+        class ErrorResponseClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url):
+                return httpx.Response(
+                    503,
+                    request=httpx.Request("GET", url),
+                )
+
+        for scout_type in (ArbeitnowScout, RemotiveScout):
+            with self.subTest(scout=scout_type.source_name):
+                with patch(
+                    "app.agents.workers.httpx.AsyncClient",
+                    return_value=ErrorResponseClient(),
+                ):
+                    with self.assertRaises(httpx.HTTPStatusError):
+                        asyncio.run(scout_type().fetch_jobs())
+
+    def test_remotive_accepts_posted_timestamps_without_timezone(self):
+        naive_timestamp = datetime.now().replace(tzinfo=None).isoformat()
+
+        class FeedResponseClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url):
+                return httpx.Response(
+                    200,
+                    json={"jobs": [{
+                        "title": "QA Engineer",
+                        "company_name": "Example Co",
+                        "url": "https://example.com/qa",
+                        "publication_date": naive_timestamp,
+                    }]},
+                    request=httpx.Request("GET", url),
+                )
+
+        with patch(
+            "app.agents.workers.httpx.AsyncClient",
+            return_value=FeedResponseClient(),
+        ):
+            jobs = asyncio.run(RemotiveScout().fetch_jobs())
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["posted_date"], "Today")
+
+    def test_discovery_logs_failed_sources_and_keeps_successful_sources(self):
+        class FakeScout:
+            def __init__(self, name, jobs=None, error=None):
+                self.name = name
+                self.jobs = jobs or []
+                self.error = error
+
+            async def fetch_jobs(self):
+                if self.error:
+                    raise self.error
+                return self.jobs
+
+        with (
+            patch(
+                "app.agents.orchestrator.CuratedEmployerScout",
+                return_value=FakeScout("Direct Employer", error=RuntimeError("feed unavailable")),
+            ),
+            patch(
+                "app.agents.orchestrator.ArbeitnowScout",
+                return_value=FakeScout("Arbeitnow", [{"url": "https://example.com/job"}]),
+            ),
+            patch(
+                "app.agents.orchestrator.RemotiveScout",
+                return_value=FakeScout("Remotive"),
+            ),
+            self.assertLogs("app.agents.orchestrator", level="INFO") as captured,
+        ):
+            jobs = asyncio.run(run_discovery_workers())
+
+        self.assertEqual(len(jobs), 1)
+        self.assertTrue(any("Direct Employer failed to fetch" in line for line in captured.output))
+        self.assertTrue(any("Arbeitnow returned 1 job listings" in line for line in captured.output))
+        self.assertTrue(any("Remotive returned 0 job listings" in line for line in captured.output))
 
     def test_listing_check_detects_404_and_closed_role(self):
         async def verify(url, status_code, body):

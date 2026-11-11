@@ -269,13 +269,47 @@ class TestGeneralJobApp(unittest.TestCase):
         self.assertEqual(jobs[0]["worker_scout"], "Fake public scout")
         self.assertEqual(jobs[2]["worker_scout"], "Fake public scout")
 
+    def test_general_scout_failures_are_logged_and_other_feeds_continue(self):
+        class FakeScout:
+            def __init__(self, name, jobs=None, error=None):
+                self.name = name
+                self.jobs = jobs or []
+                self.error = error
+
+            async def fetch_jobs(self):
+                if self.error:
+                    raise self.error
+                return self.jobs
+
+        with (
+            patch.object(
+                general,
+                "PublicJobBoardScout",
+                return_value=FakeScout("Arbeitnow Job Board Scout", error=RuntimeError("feed unavailable")),
+            ),
+            patch.object(
+                general,
+                "RemoteOpportunityScout",
+                return_value=FakeScout(
+                    "Remotive Remote Scout",
+                    [{"id": "remote-job", "url": "https://example.com/remote"}],
+                ),
+            ),
+            self.assertLogs("app.general", level="INFO") as captured,
+        ):
+            jobs = asyncio.run(general.run_general_discovery_workers())
+
+        self.assertEqual([job["id"] for job in jobs], ["remote-job"])
+        self.assertTrue(any("Arbeitnow Job Board Scout failed to fetch" in line for line in captured.output))
+        self.assertTrue(any("Remotive Remote Scout returned 1 job listings" in line for line in captured.output))
+
     def test_jury_room_shows_saved_debate_and_reviewer_panel(self):
         self.register(self.client, "Jordan Lee", "jordan@example.com")
         user_id = self.user_id("jordan@example.com")
         discovered = [{
             "id": "jury-job", "title": "Data Analyst", "company": "Example Co",
             "location": "Toronto", "url": "https://example.com/data-role",
-            "source": "Board", "worker_scout": "International Job Board Scout",
+            "source": "Board", "worker_scout": "Arbeitnow Job Board Scout",
             "description": "SQL and Excel experience preferred.",
         }]
 
@@ -302,8 +336,8 @@ class TestGeneralJobApp(unittest.TestCase):
         self.assertIn("Scouts search", response.text)
         self.assertIn("Reviewers compare", response.text)
         self.assertIn("The Jury ranks", response.text)
-        self.assertIn("International Job Board Scout", response.text)
-        self.assertIn("Remote Opportunity Scout", response.text)
+        self.assertIn("Arbeitnow Job Board Scout", response.text)
+        self.assertIn("Remotive Remote Scout", response.text)
         self.assertIn("Role &amp; Skills Advocate", response.text)
         self.assertIn("Experience &amp; Preferences Reviewer", response.text)
         self.assertIn("Posting Quality Reviewer", response.text)

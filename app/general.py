@@ -372,7 +372,7 @@ def score_job_for_profile(job: dict, profile: dict) -> int:
 class PublicJobBoardScout:
     """Collects general job-board listings, without candidate-specific curated jobs."""
 
-    name = "International Job Board Scout"
+    name = "Arbeitnow Job Board Scout"
 
     async def fetch_jobs(self) -> list[dict]:
         return await ArbeitnowScout().fetch_jobs()
@@ -381,7 +381,7 @@ class PublicJobBoardScout:
 class RemoteOpportunityScout:
     """Collects remote listings from a separate public job feed."""
 
-    name = "Remote Opportunity Scout"
+    name = "Remotive Remote Scout"
 
     async def fetch_jobs(self) -> list[dict]:
         return await RemotiveScout().fetch_jobs()
@@ -395,8 +395,18 @@ async def run_general_discovery_workers() -> list[dict]:
     jobs_by_url: dict[str, dict] = {}
     for scout, result in zip(scouts, results):
         if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result
             logger.warning("%s failed to fetch job listings: %s", scout.name, result)
             continue
+        if not isinstance(result, list):
+            logger.warning(
+                "%s returned an invalid result (%s); expected a list of jobs",
+                scout.name,
+                type(result).__name__,
+            )
+            continue
+        logger.info("%s returned %d job listings", scout.name, len(result))
         for job in result:
             url = job.get("url", "")
             if url and url not in jobs_by_url:
