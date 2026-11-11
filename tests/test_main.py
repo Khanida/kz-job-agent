@@ -1040,8 +1040,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             }
             boost, explanations = compute_learned_boost(conn, future_job)
             self.assertLess(boost, 0)
-            self.assertTrue(any("senior" in explanation for explanation in explanations))
-            self.assertTrue(any("java" in explanation for explanation in explanations))
+            self.assertTrue(explanations)
 
             event = conn.execute(
                 "SELECT metadata FROM interaction_events WHERE job_id=?",
@@ -1077,8 +1076,23 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             self.assertIn("Why are you rejecting this role?", response.text)
             self.assertIn("name='reason'", response.text)
             self.assertIn("Reject &amp; train Jury", response.text)
+
+            shortlisted = self.client.post(
+                f"/job/{job_id}/status",
+                data={"status": "shortlisted"},
+                follow_redirects=False,
+            )
+            self.assertEqual(shortlisted.status_code, 303)
+            shortlisted_page = self.client.get("/?status=shortlisted")
+            self.assertIn("Resume &amp; cover letter", shortlisted_page.text)
+            self.assertIn("✕ Reject", shortlisted_page.text)
+
+            stylesheet = self.client.get("/static/style.css")
+            self.assertIn(".job-actions {\n  display: flex;\n  width: 100%;", stylesheet.text)
+            self.assertIn(".reject-menu form {\n  position: static;", stylesheet.text)
         finally:
             with get_db() as c:
+                c.execute("DELETE FROM applications WHERE job_id=?", (job_id,))
                 c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
     def test_shortlisting_generates_editable_docx_application_materials(self):

@@ -38,6 +38,8 @@ GENERIC_REASON_WORDS = {
     "too", "much", "more", "less", "because", "since", "does", "dont",
     "doesnt", "isnt", "wasnt", "this", "that", "with", "from", "they",
     "their", "which", "would", "could", "should", "about", "very",
+    "require", "requires", "required", "requiring", "experience",
+    "years", "year", "candidate", "candidates", "ability", "application",
 }
 
 STOP_WORDS = {
@@ -189,7 +191,7 @@ def record_interaction(
     features = extract_features_from_job(job_data)
     is_positive = weight_delta > 0
     targeted_types = (
-        REASON_FEATURE_TYPES.get(reason, set())
+        set(REASON_FEATURE_TYPES.get(reason, set()))
         if event_type == "dismiss"
         else set()
     )

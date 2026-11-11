@@ -863,19 +863,24 @@ button:hover, .btn:hover {
 
 .job-footer {
   display: flex;
+  flex-wrap: wrap;
+  flex-direction: column;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding-top: 14px;
   border-top: 1px solid #eedbe3;
 }
 .job-actions {
   display: flex;
+  width: 100%;
+  flex-wrap: wrap;
   gap: 6px;
-  align-items: center;
+  align-items: flex-start;
 }
 .reject-menu {
-  position: relative;
+  position: static;
+  flex: 0 0 100%;
 }
 .reject-menu summary {
   display: inline-flex;
@@ -887,11 +892,9 @@ button:hover, .btn:hover {
   display: none;
 }
 .reject-menu form {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 8px);
-  right: 0;
-  width: min(300px, 82vw);
+  position: static;
+  width: min(100%, 380px);
+  margin-top: 8px;
   padding: 16px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
