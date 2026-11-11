@@ -1,7 +1,9 @@
 import unittest
 import asyncio
+import io
 import json
 import sqlite3
+import zipfile
 import httpx
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
@@ -996,6 +998,108 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 (jid,),
             ).fetchone()
             self.assertEqual(event["event_type"], "dismiss")
+
+    def test_shortlisting_generates_editable_docx_application_materials(self):
+        job_id = "application-materials-test"
+        with get_db() as c:
+            previous_profile = dict(c.execute(
+                "SELECT * FROM profile WHERE id=1"
+            ).fetchone())
+            c.execute(
+                """UPDATE profile SET name=?, degree=?, skills=?, cv_text=?
+                   WHERE id=1""",
+                (
+                    "Test Candidate",
+                    "B.E. Computer Systems Engineering",
+                    "Python, QA / Testing, Java",
+                    "Graduate engineer with Python and software testing experience.",
+                ),
+            )
+            c.execute(
+                """INSERT OR REPLACE INTO jobs
+                   (id, title, company, location, url, source, description, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+                (
+                    job_id,
+                    "Junior QA Engineer",
+                    "Example Systems",
+                    "Remote",
+                    "https://example.com/jobs/qa",
+                    "Test",
+                    "The role uses Python and software testing.",
+                    "2026-11-11T00:00:00+00:00",
+                ),
+            )
+
+        try:
+            response = self.client.post(
+                f"/job/{job_id}/status",
+                data={"status": "shortlisted"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            self.assertIn("drafts+are+ready", response.headers["location"])
+
+            with get_db() as c:
+                application = c.execute(
+                    "SELECT * FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                self.assertIsNotNone(application)
+                self.assertIn("Junior QA Engineer", application["tailored_cv"])
+                self.assertIn("Python", application["tailored_cv"])
+                self.assertIn("Example Systems", application["cover_letter"])
+                self.assertIn("Test Candidate", application["cover_letter"])
+
+            page = self.client.get(f"/job/{job_id}/application")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("Save edits", page.text)
+            self.assertIn("Download tailored resume (.docx)", page.text)
+
+            save_response = self.client.post(
+                f"/job/{job_id}/application/save",
+                data={
+                    "tailored_cv": "Edited resume for review",
+                    "cover_letter": "Edited cover letter for review",
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(save_response.status_code, 303)
+            with get_db() as c:
+                saved = c.execute(
+                    "SELECT tailored_cv, cover_letter FROM applications WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                self.assertEqual(saved["tailored_cv"], "Edited resume for review")
+                self.assertEqual(saved["cover_letter"], "Edited cover letter for review")
+
+            for document_type in ("resume", "cover-letter"):
+                download = self.client.get(
+                    f"/job/{job_id}/application/download/{document_type}"
+                )
+                self.assertEqual(download.status_code, 200)
+                self.assertEqual(
+                    download.headers["content-type"],
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+                with zipfile.ZipFile(io.BytesIO(download.content)) as document:
+                    self.assertIn("word/document.xml", document.namelist())
+                    text = extract_text_from_file("draft.docx", download.content)
+                    self.assertTrue(text)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM applications WHERE job_id=?", (job_id,))
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                c.execute(
+                    """UPDATE profile SET name=?, degree=?, skills=?, cv_text=?
+                       WHERE id=1""",
+                    (
+                        previous_profile["name"],
+                        previous_profile["degree"],
+                        previous_profile["skills"],
+                        previous_profile["cv_text"],
+                    ),
+                )
 
     def test_cv_upload_text_file(self):
         cv_content = b"Adeena Khanzada - Computer Systems Engineering, MUET. Skills: Python, C++, Docker, Embedded Systems."

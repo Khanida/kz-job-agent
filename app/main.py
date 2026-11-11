@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response, Form, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, Response, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager, contextmanager
@@ -16,7 +16,7 @@ from urllib.parse import quote_plus
 from app.agents.orchestrator import run_jury_deliberation_workflow, run_discovery_workers
 from app.agents.jury import SupremeJuryAgent
 from app.agents.learner import record_interaction, compute_learned_boost, get_training_profile, init_learner_db
-from app.agents.cv_analyzer import analyze_cv, get_cv_analysis
+from app.agents.cv_analyzer import analyze_cv, get_cv_analysis, score_cv_match
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(APP_DIR.parent / "jobs.db"))
@@ -286,6 +286,199 @@ def posting_link(job_id, status):
         f"href='/track/click/{esc(job_id)}'>{label}</a>"
     )
 
+
+def generate_application_materials(profile: dict, job: dict) -> Tuple[str, str]:
+    """Create locally tailored drafts using only facts in the saved profile and job."""
+    job_title = (job.get("title") or "the advertised role").strip()
+    company = (job.get("company") or "the company").strip()
+    name = (profile.get("name") or "Candidate").strip()
+    residence = (profile.get("residence") or "").strip()
+    degree = (profile.get("degree") or "").strip()
+    cv_text = (profile.get("cv_text") or "").strip()
+    match = score_cv_match(profile, job)
+    matched_skills = match["matched_skills"]
+    profile_skills = [
+        skill.strip()
+        for skill in (profile.get("skills") or "").split(",")
+        if skill.strip()
+    ]
+    relevant_skills = matched_skills or profile_skills[:8]
+
+    summary_parts = []
+    if degree:
+        summary_parts.append(f"Background: {degree}.")
+    if relevant_skills:
+        summary_parts.append(
+            "Relevant skills listed in the candidate profile: "
+            + ", ".join(relevant_skills)
+            + "."
+        )
+    if not summary_parts:
+        summary_parts.append(
+            "Candidate profile details are limited; add education and skills before using this draft."
+        )
+
+    resume_sections = [
+        name,
+        residence,
+        f"RESUME TAILORED FOR {job_title} — {company}",
+        "",
+        "PROFESSIONAL SUMMARY",
+        f"Applicant for {job_title} at {company}. " + " ".join(summary_parts),
+    ]
+    if relevant_skills:
+        resume_sections.extend([
+            "",
+            "RELEVANT SKILLS",
+            *[f"- {skill}" for skill in relevant_skills],
+        ])
+    if degree:
+        resume_sections.extend(["", "EDUCATION", degree])
+    resume_sections.extend([
+        "",
+        "ORIGINAL CV DETAILS",
+        cv_text or "No CV or experience details have been added to the profile yet.",
+    ])
+    tailored_cv = "\n".join(resume_sections).strip()
+
+    skill_phrase = ", ".join(matched_skills)
+    if skill_phrase:
+        fit_paragraph = (
+            f"My profile lists skills including {skill_phrase}, which are relevant "
+            "to the role described in your posting."
+        )
+    else:
+        fit_paragraph = (
+            "I was interested in the responsibilities described for this role and "
+            "would welcome the opportunity to discuss how my background may fit."
+        )
+    background = f"My educational background includes {degree}." if degree else ""
+    cover_letter = "\n".join([
+        "Dear Hiring Team,",
+        "",
+        f"I am writing to apply for the {job_title} position at {company}.",
+        background,
+        fit_paragraph,
+        "",
+        "I would welcome the opportunity to discuss my application and how I could "
+        "contribute to your team. Thank you for your time and consideration.",
+        "",
+        "Sincerely,",
+        name,
+    ])
+    return tailored_cv, cover_letter
+
+
+def make_docx(content: str) -> bytes:
+    """Build a minimal Word document with readable title and section headings."""
+    word_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    package_rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    content_type_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+    xml_ns = "http://www.w3.org/XML/1998/namespace"
+    ET.register_namespace("w", word_ns)
+    ET.register_namespace("r", rel_ns)
+    ET.register_namespace("", package_rel_ns)
+
+    document = ET.Element(f"{{{word_ns}}}document")
+    body = ET.SubElement(document, f"{{{word_ns}}}body")
+    section_headings = {
+        "PROFESSIONAL SUMMARY", "RELEVANT SKILLS", "EDUCATION",
+        "ORIGINAL CV DETAILS",
+    }
+    for index, line in enumerate(content.splitlines()):
+        paragraph = ET.SubElement(body, f"{{{word_ns}}}p")
+        if not line:
+            continue
+        run = ET.SubElement(paragraph, f"{{{word_ns}}}r")
+        if index == 0 or line in section_headings:
+            properties = ET.SubElement(run, f"{{{word_ns}}}rPr")
+            ET.SubElement(properties, f"{{{word_ns}}}b")
+            size = "32" if index == 0 else "24"
+            ET.SubElement(properties, f"{{{word_ns}}}sz", {f"{{{word_ns}}}val": size})
+        text = ET.SubElement(run, f"{{{word_ns}}}t")
+        text.set(f"{{{xml_ns}}}space", "preserve")
+        text.text = line
+
+    page_section = ET.SubElement(body, f"{{{word_ns}}}sectPr")
+    ET.SubElement(
+        page_section,
+        f"{{{word_ns}}}pgSz",
+        {f"{{{word_ns}}}w": "12240", f"{{{word_ns}}}h": "15840"},
+    )
+    ET.SubElement(
+        page_section,
+        f"{{{word_ns}}}pgMar",
+        {
+            f"{{{word_ns}}}top": "1440",
+            f"{{{word_ns}}}right": "1440",
+            f"{{{word_ns}}}bottom": "1440",
+            f"{{{word_ns}}}left": "1440",
+        },
+    )
+
+    content_types = ET.Element(f"{{{content_type_ns}}}Types")
+    ET.SubElement(
+        content_types,
+        f"{{{content_type_ns}}}Default",
+        {"Extension": "rels", "ContentType": "application/vnd.openxmlformats-package.relationships+xml"},
+    )
+    ET.SubElement(
+        content_types,
+        f"{{{content_type_ns}}}Default",
+        {"Extension": "xml", "ContentType": "application/xml"},
+    )
+    ET.SubElement(
+        content_types,
+        f"{{{content_type_ns}}}Override",
+        {
+            "PartName": "/word/document.xml",
+            "ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        },
+    )
+    relationships = ET.Element(f"{{{package_rel_ns}}}Relationships")
+    ET.SubElement(
+        relationships,
+        f"{{{package_rel_ns}}}Relationship",
+        {
+            "Id": "rId1",
+            "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+            "Target": "word/document.xml",
+        },
+    )
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", ET.tostring(content_types, encoding="utf-8", xml_declaration=True))
+        archive.writestr("_rels/.rels", ET.tostring(relationships, encoding="utf-8", xml_declaration=True))
+        archive.writestr("word/document.xml", ET.tostring(document, encoding="utf-8", xml_declaration=True))
+    return output.getvalue()
+
+
+def store_application_materials(c: sqlite3.Connection, job: dict, profile: dict) -> None:
+    tailored_cv, cover_letter = generate_application_materials(profile, job)
+    existing = c.execute(
+        "SELECT id FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
+        (job["id"],),
+    ).fetchone()
+    if existing:
+        c.execute(
+            """UPDATE applications
+               SET status=?, tailored_cv=?, cover_letter=? WHERE id=?""",
+            (job.get("status") or "new", tailored_cv, cover_letter, existing["id"]),
+        )
+    else:
+        c.execute(
+            """INSERT INTO applications
+               (job_id, status, tailored_cv, cover_letter, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                job["id"], job.get("status") or "new", tailored_cv, cover_letter,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+
 def layout(body, active_nav="dashboard"):
     nav_links = [
         ("/", "Dashboard", "dashboard"),
@@ -505,6 +698,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 </div>
                 <div class='job-actions'>
                   {action_btn}
+                  {f"<a class='btn btn-secondary btn-sm' href='/job/{dp_id}/application'>Resume &amp; cover letter</a>" if dp_status in ('shortlisted', 'applied') else ""}
                 </div>
               </div>
             </div>
@@ -570,6 +764,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             job_card_class += " is-shortlisted"
             status_pill = "<span class='pill pill-amber'>★ Shortlisted</span>"
             action_buttons = f"""
+              <a class='btn btn-secondary btn-sm' href='/job/{j_id}/application'>Resume &amp; cover letter</a>
               <form method='post' action='/job/{j_id}/status' style='margin:0'>
                 <input type='hidden' name='status' value='applied'>
                 <button type='submit' class='btn-sm'>Mark Applied</button>
@@ -583,6 +778,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
             job_card_class += " is-applied"
             status_pill = "<span class='pill pill-blue'>✓ Applied</span>"
             action_buttons = f"""
+              <a class='btn btn-secondary btn-sm' href='/job/{j_id}/application'>Resume &amp; cover letter</a>
               <form method='post' action='/job/{j_id}/status' style='margin:0'>
                 <input type='hidden' name='status' value='shortlisted'>
                 <button type='submit' class='btn-sm btn-subtle'>Move to Shortlist</button>
@@ -1222,6 +1418,141 @@ def download_cv():
         media_type="application/octet-stream"
     )
 
+
+@app.get("/job/{job_id}/application", response_class=HTMLResponse)
+def application_page(job_id: str, msg: str = ""):
+    with get_db() as c:
+        job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not job:
+            return RedirectResponse("/?msg=" + quote_plus("Job not found."), status_code=303)
+        application = c.execute(
+            """SELECT * FROM applications WHERE job_id=?
+               ORDER BY id DESC LIMIT 1""",
+            (job_id,),
+        ).fetchone()
+
+    resume_text = application["tailored_cv"] if application and application["tailored_cv"] else ""
+    cover_text = application["cover_letter"] if application and application["cover_letter"] else ""
+    downloads = ""
+    if resume_text and cover_text:
+        downloads = f"""
+        <div style='display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;'>
+          <a class='btn btn-secondary btn-sm' href='/job/{esc(job_id)}/application/download/resume'>Download tailored resume (.docx)</a>
+          <a class='btn btn-secondary btn-sm' href='/job/{esc(job_id)}/application/download/cover-letter'>Download cover letter (.docx)</a>
+        </div>
+        """
+    flash_banner = f"<div class='notice notice-info'>{esc(msg)}</div>" if msg else ""
+    return layout(f"""
+    {flash_banner}
+    <div class='sectionhead'>
+      <div>
+        <p class='eyebrow'>APPLICATION MATERIALS</p>
+        <h1>{esc(job['title'])} · {esc(job['company'])}</h1>
+      </div>
+      <a href='/' class='btn btn-secondary btn-sm'>Back to jobs</a>
+    </div>
+    <p class='muted'>Drafts are generated locally from your saved profile and this job posting. Review every detail for accuracy before using them.</p>
+    {downloads}
+    <div style='display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;'>
+      <form method='post' action='/job/{esc(job_id)}/application/generate' style='margin:0;'>
+        <button type='submit' class='btn btn-gold'>{'Regenerate from profile' if resume_text or cover_text else 'Generate drafts'}</button>
+      </form>
+    </div>
+    <form method='post' action='/job/{esc(job_id)}/application/save' class='panel'>
+      <label>Tailored resume
+        <textarea name='tailored_cv' rows='18' required>{esc(resume_text)}</textarea>
+      </label>
+      <label>Cover letter
+        <textarea name='cover_letter' rows='12' required>{esc(cover_text)}</textarea>
+      </label>
+      <div style='display:flex; gap:10px; flex-wrap:wrap;'>
+        <button type='submit' class='primary'>Save edits</button>
+      </div>
+    </form>
+    """)
+
+
+@app.post("/job/{job_id}/application/generate")
+def regenerate_application_materials(job_id: str):
+    with get_db() as c:
+        job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        profile = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if not profile:
+            raise HTTPException(status_code=500, detail="Candidate profile is not configured")
+        store_application_materials(c, dict(job), dict(profile))
+    return RedirectResponse(
+        f"/job/{quote_plus(job_id)}/application?msg="
+        + quote_plus("Drafts regenerated from your saved profile."),
+        status_code=303,
+    )
+
+
+@app.post("/job/{job_id}/application/save")
+def save_application_materials(
+    job_id: str,
+    tailored_cv: str = Form(...),
+    cover_letter: str = Form(...),
+):
+    with get_db() as c:
+        job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        application = c.execute(
+            """SELECT id FROM applications WHERE job_id=?
+               ORDER BY id DESC LIMIT 1""",
+            (job_id,),
+        ).fetchone()
+        if application:
+            c.execute(
+                """UPDATE applications SET tailored_cv=?, cover_letter=?
+                   WHERE id=?""",
+                (tailored_cv, cover_letter, application["id"]),
+            )
+        else:
+            c.execute(
+                """INSERT INTO applications
+                   (job_id, status, tailored_cv, cover_letter, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    job_id, job["status"] or "new", tailored_cv, cover_letter,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+    return RedirectResponse(
+        f"/job/{quote_plus(job_id)}/application?msg=" + quote_plus("Draft edits saved."),
+        status_code=303,
+    )
+
+
+@app.get("/job/{job_id}/application/download/{document_type}")
+def download_application_material(job_id: str, document_type: str):
+    if document_type not in {"resume", "cover-letter"}:
+        raise HTTPException(status_code=404, detail="Document type not found")
+    field = "tailored_cv" if document_type == "resume" else "cover_letter"
+    with get_db() as c:
+        job = c.execute("SELECT title, company FROM jobs WHERE id=?", (job_id,)).fetchone()
+        application = c.execute(
+            f"""SELECT {field} FROM applications WHERE job_id=?
+                ORDER BY id DESC LIMIT 1""",
+            (job_id,),
+        ).fetchone()
+    if not job or not application or not application[field]:
+        raise HTTPException(status_code=404, detail="Application draft not found")
+    base_name = re.sub(
+        r"[^a-zA-Z0-9]+",
+        "-",
+        f"{job['company'] or ''}-{job['title'] or ''}",
+    ).strip("-").lower() or "application"
+    filename = f"{base_name}-{document_type}.docx"
+    return Response(
+        content=make_docx(application[field]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.post("/job/{job_id}/status")
 def update_job_status(job_id: str, request: Request, status: str = Form(...)):
     allowed = ["new", "shortlisted", "applied", "dismissed"]
@@ -1240,12 +1571,39 @@ def update_job_status(job_id: str, request: Request, status: str = Form(...)):
             record_interaction(c, sid, job_id, event_type, dict(job))
 
         c.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
-        if status == "applied":
-            c.execute("""INSERT INTO applications (job_id, status, created_at)
-                         VALUES (?, 'applied', ?)""",
-                      (job_id, datetime.now(timezone.utc).isoformat()))
+        if job and status == "shortlisted":
+            profile = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+            if not profile:
+                raise HTTPException(status_code=500, detail="Candidate profile is not configured")
+            job_data = dict(job)
+            job_data["status"] = status
+            store_application_materials(c, job_data, dict(profile))
+        elif job and status == "applied":
+            application = c.execute(
+                """SELECT id FROM applications WHERE job_id=?
+                   ORDER BY id DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+            if application:
+                c.execute(
+                    "UPDATE applications SET status='applied' WHERE id=?",
+                    (application["id"],),
+                )
+            else:
+                c.execute(
+                    """INSERT INTO applications (job_id, status, created_at)
+                       VALUES (?, 'applied', ?)""",
+                    (job_id, datetime.now(timezone.utc).isoformat()),
+                )
 
-    return RedirectResponse(f"/?status={status}&msg=" + quote_plus(f"Job marked as {status}! Agents trained on your selection."), status_code=303)
+    if status == "shortlisted":
+        message = "Job shortlisted; resume and cover letter drafts are ready to review."
+    else:
+        message = f"Job marked as {status}! Agents trained on your selection."
+    return RedirectResponse(
+        f"/?status={status}&msg=" + quote_plus(message),
+        status_code=303,
+    )
 
 @app.get("/track/click/{job_id}")
 def track_job_click(job_id: str, request: Request):
@@ -1270,7 +1628,17 @@ def reset_training():
 def shortlist(job_id: str):
     with get_db() as c:
         c.execute("UPDATE jobs SET status='shortlisted' WHERE id=?", (job_id,))
-    return RedirectResponse("/?status=shortlisted&msg=" + quote_plus("Job added to your shortlist!"), status_code=303)
+        job = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        profile = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        if job and not profile:
+            raise HTTPException(status_code=500, detail="Candidate profile is not configured")
+        if job and profile:
+            store_application_materials(c, dict(job), dict(profile))
+    return RedirectResponse(
+        "/?status=shortlisted&msg="
+        + quote_plus("Job added to your shortlist; resume and cover letter drafts are ready to review."),
+        status_code=303,
+    )
 
 @app.post("/scan")
 async def scan():

@@ -33,11 +33,12 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Animated workflow**: The dashboard illustrates workers collecting job files, Sub-Agents debating, and the Jury ranking the daily top five whenever the page loads.
 - **Live Liveness & Recency Indicators**: Real-time tags (`🟢 Live on Website`, `📅 Recently posted`).
 - **Pipeline Workflow**: Status transitions (`New`, `Shortlisted`, `Applied`, `Dismissed`) logged in SQLite.
+- **Per-job application drafts** (`app.main`): Shortlisting a role locally prepares an editable tailored resume and cover letter from the saved profile and job posting. Review and edit drafts in the app, then download each as a Word document. Drafts are rule-based rather than AI-generated and must be checked for accuracy before use.
 - **Candidate Profile Matrix** (`/profile`): Custom matching criteria, skills, and CV summary.
 - **Render Ready**: Blueprint config with persistent disk support.
 
 ## Important limitations
-This is a starter, not a finished autonomous applicant. The current scanner is a discovery prototype. Public feeds are incomplete, keyword matching is not semantic, and visa/housing evidence is not verified. Neither app submits applications, answers legal questions, or sends personal data to employers. The original `app.main` app does not create accounts.
+This is a starter, not a finished autonomous applicant. The current scanner is a discovery prototype. Public feeds are incomplete, keyword matching is not semantic, and visa/housing evidence is not verified. Neither app submits applications, answers legal questions, or sends personal data to employers. Application drafts in `app.main` are generated locally from the information already saved in the profile and should be reviewed before use. The original `app.main` app does not create accounts.
 CV skills and role suggestions use local keyword heuristics, not an external AI service; review the suggested roles before relying on them.
 
 The limitations below apply to the original `app.main` entry point unless noted otherwise. `app.general` adds local account login and per-user data files, but it does not include email verification, password recovery, account administration, or managed database services. Before inviting real users or deploying publicly:
