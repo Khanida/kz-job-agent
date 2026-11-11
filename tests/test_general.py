@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import tempfile
 import unittest
@@ -110,10 +111,15 @@ class TestGeneralJobApp(unittest.TestCase):
         user_id = self.user_id("jordan@example.com")
         with general.get_user_db(user_id) as conn:
             conn.execute(
-                """INSERT INTO jobs (id, title, company, url, source, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """UPDATE profile SET target_roles='Analyst' WHERE id=1"""
+            )
+            conn.execute(
+                """INSERT INTO jobs
+                   (id, title, company, url, source, jury_score, authenticity_status, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 ("saveable-job", "Junior Analyst", "Example Co",
-                 "https://example.com/job", "Test", "new", "2026-11-10"),
+                 "https://example.com/job", "Test", 80, "likely_official",
+                 "new", "2026-11-10"),
             )
         csrf = self.csrf_token(self.client, "/dashboard")
         response = self.client.post(
@@ -130,6 +136,43 @@ class TestGeneralJobApp(unittest.TestCase):
             ).fetchone()
         self.assertEqual(job["status"], "shortlisted")
         self.assertEqual(event["event_type"], "shortlist")
+
+        dashboard = self.client.get("/dashboard")
+        self.assertIn("Why are you rejecting this role?", dashboard.text)
+        csrf = self.csrf_token(self.client, "/dashboard")
+        rejection = self.client.post(
+            "/job/saveable-job/status",
+            data={
+                "status": "dismissed",
+                "reason": "role_type",
+                "reason_details": "This analyst role is not my preferred work",
+                "csrf_token": csrf,
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(rejection.status_code, 303)
+        with general.get_user_db(user_id) as conn:
+            job = conn.execute(
+                "SELECT status FROM jobs WHERE id=?", ("saveable-job",)
+            ).fetchone()
+            event = conn.execute(
+                """SELECT metadata FROM interaction_events
+                   WHERE job_id=? AND event_type='dismiss'
+                   ORDER BY id DESC LIMIT 1""",
+                ("saveable-job",),
+            ).fetchone()
+            learned = conn.execute(
+                """SELECT score_delta, positive_hits, negative_hits FROM learned_weights
+                   WHERE feature_type='role_keyword' AND feature_value='analyst'"""
+            ).fetchone()
+        self.assertEqual(job["status"], "dismissed")
+        metadata = json.loads(event["metadata"])
+        self.assertEqual(metadata["reason"], "role_type")
+        self.assertEqual(metadata["reason_details"], "This analyst role is not my preferred work")
+        self.assertIsNotNone(learned)
+        self.assertEqual(learned["score_delta"], -3.5)
+        self.assertEqual(learned["positive_hits"], 1)
+        self.assertEqual(learned["negative_hits"], 2)
 
     def test_profile_saves_preferences_and_login_restores_account(self):
         self.register(self.client, "Jordan Lee", "jordan@example.com")

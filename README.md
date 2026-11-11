@@ -33,6 +33,7 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Animated workflow**: The dashboard illustrates workers collecting job files, Sub-Agents debating, and the Jury ranking the daily top five whenever the page loads.
 - **Live Liveness & Recency Indicators**: Real-time tags (`🟢 Live on Website`, `📅 Recently posted`).
 - **Pipeline Workflow**: Status transitions (`New`, `Shortlisted`, `Applied`, `Dismissed`) logged in SQLite.
+- **Reasoned job rejection** (`app.main`): Reject a role with a reason and optional detail. The Jury records your feedback and learns a stronger penalty for matching seniority, skill, location, authorization, compensation, role-type, company, or specific posting terms when ranking future roles.
 - **Per-job application drafts** (`app.main`): Shortlisting a role locally prepares an editable tailored resume and cover letter from the saved profile and job posting. Review and edit drafts in the app, then download each as a Word document. Drafts are rule-based rather than AI-generated and must be checked for accuracy before use.
 - **Candidate Profile Matrix** (`/profile`): Custom matching criteria, skills, and CV summary.
 - **Render Ready**: Blueprint config with persistent disk support.

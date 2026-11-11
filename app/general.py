@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.agents.cv_analyzer import analyze_cv
-from app.agents.learner import init_learner_db, record_interaction
+from app.agents.learner import REJECTION_REASONS, init_learner_db, record_interaction
 from app.agents.orchestrator import verify_listing_availability
 from app.agents.workers import ArbeitnowScout, RemotiveScout
 
@@ -913,7 +913,11 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
              Employer: {esc(job['authenticity_status'] or 'unverified').replace('_', ' ').title()}</p>
           <a href='/jury#{esc(job['id'])}'>Read Jury notes →</a>
           <div class='job-footer'>{job_link(job['id'], job['liveness_status'])}
-            {status_action(job['id'], job['status'], csrf)}</div>
+            <div class='job-actions'>
+              {status_action(job['id'], job['status'], csrf)}
+              {rejection_form(job['id'], csrf)}
+            </div>
+          </div>
         </article>"""
         for job in picks
     )
@@ -1093,7 +1097,11 @@ def jury_room(request: Request):
             <p class='verdict-action'><b>Next step:</b> {esc(job['recommendation'])}</p>
           </div>
           <div class='job-footer'>{job_link(job['id'], job['liveness_status'])}
-            {status_action(job['id'], job['status'], csrf)}</div>
+            <div class='job-actions'>
+              {status_action(job['id'], job['status'], csrf)}
+              {rejection_form(job['id'], csrf)}
+            </div>
+          </div>
         </article>""")
 
     latest = ""
@@ -1169,6 +1177,30 @@ def status_action(job_id: str, status: str, csrf: str) -> str:
       <button class='btn-sm btn-gold' type='submit'>Save job</button></form>"""
 
 
+def rejection_form(job_id: str, csrf: str) -> str:
+    options = "".join(
+        f"<option value='{esc(reason)}'>{esc(label)}</option>"
+        for reason, label in REJECTION_REASONS.items()
+    )
+    return f"""<details class='reject-menu'>
+      <summary class='btn-sm btn-subtle' title='Reject this job and train the Jury'>✕ Reject</summary>
+      <form method='post' action='/job/{esc(job_id)}/status'>
+        <input type='hidden' name='csrf_token' value='{esc(csrf)}'>
+        <input type='hidden' name='status' value='dismissed'>
+        <label>Why are you rejecting this role?
+          <select name='reason' required>
+            <option value='' selected disabled>Choose a reason</option>
+            {options}
+          </select>
+        </label>
+        <label>More detail (optional)
+          <input name='reason_details' maxlength='300' placeholder='What should the Jury learn?'>
+        </label>
+        <button class='btn-sm' type='submit'>Reject &amp; train Jury</button>
+      </form>
+    </details>"""
+
+
 def render_job(job: sqlite3.Row, csrf: str) -> str:
     status = job["status"] or "new"
     actions = status_action(job["id"], status, csrf)
@@ -1196,11 +1228,7 @@ def render_job(job: sqlite3.Row, csrf: str) -> str:
       <p><a href='/jury#{esc(job['id'])}'>Read Jury notes →</a></p>
       <div class='job-footer'>{job_link(job['id'], job['liveness_status'])}
         <div class='job-actions'>{actions}
-          <form method='post' action='/job/{esc(job['id'])}/status'>
-            <input type='hidden' name='csrf_token' value='{esc(csrf)}'>
-            <input type='hidden' name='status' value='dismissed'>
-            <button class='btn-sm btn-subtle' type='submit' title='Hide job'>Hide</button>
-          </form>
+          {rejection_form(job['id'], csrf)}
         </div>
       </div>
     </article>"""
@@ -1304,12 +1332,16 @@ def update_job_status(
     request: Request,
     status: str = Form(...),
     csrf_token: str = Form(...),
+    reason: str = Form(""),
+    reason_details: str = Form("", max_length=300),
 ):
     user, _ = user_context(request)
     validate_csrf(request, csrf_token)
     allowed = {"new", "shortlisted", "applied", "dismissed"}
     if status not in allowed:
         raise HTTPException(status_code=400, detail="Choose a valid job status.")
+    if reason and reason not in REJECTION_REASONS:
+        raise HTTPException(status_code=422, detail="Choose a valid rejection reason.")
     with get_user_db(user["id"]) as conn:
         job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not job:
@@ -1321,8 +1353,26 @@ def update_job_status(
                 "applied": "apply",
                 "dismissed": "dismiss",
             }[status]
-            record_interaction(conn, user["id"], job_id, event, dict(job))
-    return RedirectResponse("/dashboard?status=" + status, status_code=303)
+            record_interaction(
+                conn,
+                user["id"],
+                job_id,
+                event,
+                dict(job),
+                reason=reason if status == "dismissed" else "",
+                reason_details=reason_details if status == "dismissed" else "",
+            )
+    message = (
+        "Job rejected; Jury trained on your reason: "
+        + REJECTION_REASONS[reason]
+        + "."
+        if status == "dismissed" and reason
+        else ""
+    )
+    location = "/dashboard?status=" + status
+    if message:
+        location += "&msg=" + quote_plus(message)
+    return RedirectResponse(location, status_code=303)
 
 
 @app.get("/job/{job_id}/visit")

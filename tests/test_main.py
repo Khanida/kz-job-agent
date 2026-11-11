@@ -17,6 +17,7 @@ from app.agents.workers import BaseWorker, CuratedEmployerScout
 from app.agents.orchestrator import run_jury_deliberation_workflow
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
 from app.agents.jury import SupremeJuryAgent
+from app.agents.learner import record_interaction, compute_learned_boost
 
 class TestMultiAgentJobSystem(unittest.TestCase):
     def setUp(self):
@@ -999,6 +1000,87 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             ).fetchone()
             self.assertEqual(event["event_type"], "dismiss")
 
+    def test_rejection_reason_trains_targeted_jury_preferences(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        job = {
+            "id": "seniority-feedback",
+            "title": "Senior Python Engineer",
+            "company": "Feedback Systems",
+            "location": "Remote",
+            "source": "Test",
+            "description": "Requires at least 5 years of experience and Java.",
+        }
+        try:
+            record_interaction(
+                conn,
+                "test-session",
+                job["id"],
+                "dismiss",
+                job,
+                reason="seniority",
+                reason_details="Requires Java experience",
+            )
+            weights = {
+                (row["feature_type"], row["feature_value"]): row["score_delta"]
+                for row in conn.execute(
+                    "SELECT feature_type, feature_value, score_delta FROM learned_weights"
+                )
+            }
+            self.assertEqual(weights[("career_level", "senior")], -7.0)
+            self.assertEqual(weights[("keyword", "python")], -3.5)
+            self.assertEqual(weights[("user_keyword", "java")], -7.0)
+
+            future_job = {
+                "title": "Senior Java Engineer",
+                "company": "Another Company",
+                "location": "Remote",
+                "source": "Test",
+                "description": "Build software for customers.",
+            }
+            boost, explanations = compute_learned_boost(conn, future_job)
+            self.assertLess(boost, 0)
+            self.assertTrue(any("senior" in explanation for explanation in explanations))
+            self.assertTrue(any("java" in explanation for explanation in explanations))
+
+            event = conn.execute(
+                "SELECT metadata FROM interaction_events WHERE job_id=?",
+                (job["id"],),
+            ).fetchone()
+            metadata = json.loads(event["metadata"])
+            self.assertEqual(metadata["reason"], "seniority")
+            self.assertEqual(metadata["reason_details"], "Requires Java experience")
+        finally:
+            conn.close()
+
+    def test_job_cards_show_reject_reason_form(self):
+        job_id = "rejection-form-test"
+        with get_db() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO jobs
+                   (id, title, company, location, url, source, description, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?)""",
+                (
+                    job_id,
+                    "Test Analyst",
+                    "Test Feedback Co",
+                    "Remote",
+                    "https://example.com/jobs/feedback",
+                    "Test",
+                    "A sample role for UI verification.",
+                    "2026-11-11T00:00:00+00:00",
+                ),
+            )
+        try:
+            response = self.client.get("/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Why are you rejecting this role?", response.text)
+            self.assertIn("name='reason'", response.text)
+            self.assertIn("Reject &amp; train Jury", response.text)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
     def test_shortlisting_generates_editable_docx_application_materials(self):
         job_id = "application-materials-test"
         with get_db() as c:
@@ -1054,7 +1136,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             page = self.client.get(f"/job/{job_id}/application")
             self.assertEqual(page.status_code, 200)
             self.assertIn("Save edits", page.text)
-            self.assertIn("Download tailored resume (.docx)", page.text)
+            self.assertIn("Download editable resume (Word .docx)", page.text)
 
             save_response = self.client.post(
                 f"/job/{job_id}/application/save",

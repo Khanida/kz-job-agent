@@ -15,7 +15,13 @@ from urllib.parse import quote_plus
 
 from app.agents.orchestrator import run_jury_deliberation_workflow, run_discovery_workers
 from app.agents.jury import SupremeJuryAgent
-from app.agents.learner import record_interaction, compute_learned_boost, get_training_profile, init_learner_db
+from app.agents.learner import (
+    REJECTION_REASONS,
+    record_interaction,
+    compute_learned_boost,
+    get_training_profile,
+    init_learner_db,
+)
 from app.agents.cv_analyzer import analyze_cv, get_cv_analysis, score_cv_match
 
 APP_DIR = Path(__file__).resolve().parent
@@ -285,6 +291,31 @@ def posting_link(job_id, status):
         f"<a class='apply-link' target='_blank' rel='noopener noreferrer' "
         f"href='/track/click/{esc(job_id)}'>{label}</a>"
     )
+
+
+def reject_job_form(job_id: str) -> str:
+    options = "".join(
+        f"<option value='{esc(reason)}'>{esc(label)}</option>"
+        for reason, label in REJECTION_REASONS.items()
+    )
+    return f"""
+    <details class='reject-menu'>
+      <summary class='btn-sm btn-subtle' title='Reject this job and train the Jury'>✕ Reject</summary>
+      <form method='post' action='/job/{esc(job_id)}/status'>
+        <input type='hidden' name='status' value='dismissed'>
+        <label>Why are you rejecting this role?
+          <select name='reason' required>
+            <option value='' selected disabled>Choose a reason</option>
+            {options}
+          </select>
+        </label>
+        <label>More detail (optional)
+          <input name='reason_details' maxlength='300' placeholder='What should the Jury learn?'>
+        </label>
+        <button type='submit' class='btn-sm'>Reject &amp; train Jury</button>
+      </form>
+    </details>
+    """
 
 
 def generate_application_materials(profile: dict, job: dict) -> Tuple[str, str]:
@@ -699,6 +730,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <div class='job-actions'>
                   {action_btn}
                   {f"<a class='btn btn-secondary btn-sm' href='/job/{dp_id}/application'>Resume &amp; cover letter</a>" if dp_status in ('shortlisted', 'applied') else ""}
+                  {reject_job_form(dp_id)}
                 </div>
               </div>
             </div>
@@ -773,6 +805,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <input type='hidden' name='status' value='new'>
                 <button type='submit' class='btn-sm btn-subtle'>Remove</button>
               </form>
+              {reject_job_form(j_id)}
             """
         elif j_status == "applied":
             job_card_class += " is-applied"
@@ -783,6 +816,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <input type='hidden' name='status' value='shortlisted'>
                 <button type='submit' class='btn-sm btn-subtle'>Move to Shortlist</button>
               </form>
+              {reject_job_form(j_id)}
             """
         elif j_status == "dismissed":
             status_pill = "<span class='pill'>Dismissed</span>"
@@ -798,10 +832,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
                 <input type='hidden' name='status' value='shortlisted'>
                 <button type='submit' class='btn-sm'>Shortlist</button>
               </form>
-              <form method='post' action='/job/{j_id}/status' style='margin:0'>
-                <input type='hidden' name='status' value='dismissed'>
-                <button type='submit' class='btn-sm btn-subtle' title='Hide vacancy'>✕</button>
-              </form>
+              {reject_job_form(j_id)}
             """
 
         advocate_badge = f"<span class='pill' style='background:#f6e8ee;'>{j_advocate}</span>" if j_advocate else ""
@@ -1053,6 +1084,7 @@ def jury_room(msg: str = ""):
             {posting_link(jid, j_liveness)}
             <div class='job-actions'>
               {action_btn}
+              {reject_job_form(jid)}
             </div>
           </div>
         </div>
@@ -1437,8 +1469,8 @@ def application_page(job_id: str, msg: str = ""):
     if resume_text and cover_text:
         downloads = f"""
         <div style='display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;'>
-          <a class='btn btn-secondary btn-sm' href='/job/{esc(job_id)}/application/download/resume'>Download tailored resume (.docx)</a>
-          <a class='btn btn-secondary btn-sm' href='/job/{esc(job_id)}/application/download/cover-letter'>Download cover letter (.docx)</a>
+          <a class='btn btn-secondary btn-sm' href='/job/{esc(job_id)}/application/download/resume'>Download editable resume (Word .docx)</a>
+          <a class='btn btn-secondary btn-sm' href='/job/{esc(job_id)}/application/download/cover-letter'>Download editable cover letter (Word .docx)</a>
         </div>
         """
     flash_banner = f"<div class='notice notice-info'>{esc(msg)}</div>" if msg else ""
@@ -1554,10 +1586,18 @@ def download_application_material(job_id: str, document_type: str):
 
 
 @app.post("/job/{job_id}/status")
-def update_job_status(job_id: str, request: Request, status: str = Form(...)):
+def update_job_status(
+    job_id: str,
+    request: Request,
+    status: str = Form(...),
+    reason: str = Form(""),
+    reason_details: str = Form("", max_length=300),
+):
     allowed = ["new", "shortlisted", "applied", "dismissed"]
     if status not in allowed:
         status = "new"
+    if reason and reason not in REJECTION_REASONS:
+        raise HTTPException(status_code=422, detail="Choose a valid rejection reason")
 
     sid = getattr(request.state, "session_id", request.cookies.get("agent_session", "user_default"))
     with get_db() as c:
@@ -1568,7 +1608,15 @@ def update_job_status(job_id: str, request: Request, status: str = Form(...)):
                 "applied": "apply",
                 "dismissed": "dismiss",
             }[status]
-            record_interaction(c, sid, job_id, event_type, dict(job))
+            record_interaction(
+                c,
+                sid,
+                job_id,
+                event_type,
+                dict(job),
+                reason=reason if status == "dismissed" else "",
+                reason_details=reason_details if status == "dismissed" else "",
+            )
 
         c.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
         if job and status == "shortlisted":
@@ -1598,6 +1646,12 @@ def update_job_status(job_id: str, request: Request, status: str = Form(...)):
 
     if status == "shortlisted":
         message = "Job shortlisted; resume and cover letter drafts are ready to review."
+    elif status == "dismissed" and reason:
+        message = (
+            "Job rejected; Jury trained on your reason: "
+            + REJECTION_REASONS[reason]
+            + "."
+        )
     else:
         message = f"Job marked as {status}! Agents trained on your selection."
     return RedirectResponse(

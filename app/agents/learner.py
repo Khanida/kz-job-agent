@@ -12,6 +12,34 @@ EVENT_WEIGHTS = {
     "dismiss": -3.5
 }
 
+REJECTION_REASONS = {
+    "seniority": "Too senior / too much experience required",
+    "skills": "Skills or experience are not a good match",
+    "location": "Location or relocation does not work for me",
+    "authorization": "Work authorization or visa is unsuitable",
+    "compensation": "Salary or benefits are not suitable",
+    "role_type": "The role type is not what I want",
+    "company": "I do not want to work for this company",
+    "other": "Other reason",
+}
+
+REASON_FEATURE_TYPES = {
+    "seniority": {"career_level"},
+    "skills": {"keyword"},
+    "location": {"location"},
+    "authorization": {"eligibility"},
+    "compensation": {"compensation"},
+    "role_type": {"role_keyword"},
+    "company": {"company"},
+}
+
+GENERIC_REASON_WORDS = {
+    "job", "role", "work", "want", "wanted", "need", "needed", "not",
+    "too", "much", "more", "less", "because", "since", "does", "dont",
+    "doesnt", "isnt", "wasnt", "this", "that", "with", "from", "they",
+    "their", "which", "would", "could", "should", "about", "very",
+}
+
 STOP_WORDS = {
     "and", "the", "with", "for", "our", "you", "your", "will", "are", "have", "that", "this",
     "from", "work", "join", "team", "looking", "seeking", "role", "position", "jobs", "hire",
@@ -51,7 +79,9 @@ def extract_features_from_job(job: Dict[str, Any]) -> List[Tuple[str, str]]:
         features.append(("company", company))
         
     # 2. Location tokens
-    location = (job.get("location") or "").lower()
+    location = (job.get("location") or "").strip().lower()
+    if location:
+        features.append(("location", location))
     for loc_token in ["london", "berlin", "amsterdam", "remote", "germany", "uk", "netherlands", "australia", "singapore", "worldwide"]:
         if loc_token in location:
             features.append(("location", loc_token))
@@ -66,7 +96,8 @@ def extract_features_from_job(job: Dict[str, Any]) -> List[Tuple[str, str]]:
     tech_keywords = [
         "python", "c++", "java", "flutter", "firebase", "embedded", "qa", "testing",
         "automation", "support", "distributed", "backend", "cloud", "api", "systems",
-        "linux", "docker", "react", "fastapi", "junior", "graduate", "entry"
+        "linux", "docker", "react", "fastapi", "junior", "graduate", "entry",
+        "senior", "lead", "principal", "staff", "intern"
     ]
     for kw in tech_keywords:
         if kw == "c++":
@@ -76,13 +107,70 @@ def extract_features_from_job(job: Dict[str, Any]) -> List[Tuple[str, str]]:
             if re.search(r'\b' + re.escape(kw) + r'\b', text):
                 features.append(("keyword", kw))
 
+    title = (job.get("title") or "").lower()
+    if re.search(r"\b(?:senior|sr\.?|lead|principal|staff|head of)\b", title):
+        features.append(("career_level", "senior"))
+    if re.search(
+        r"\b(?:at least|minimum of|required|requires?|requiring)\s+"
+        r"(\d{1,2})\+?\s+years?\s+(?:of\s+)?(?:professional\s+|relevant\s+|industry\s+)?experience\b",
+        text,
+    ):
+        features.append(("career_level", "experience_requirement"))
+
+    if re.search(
+        r"\b(?:visa|sponsor(?:ship)?|work authorization|work permit|right to work|iqama)\b",
+        text,
+    ):
+        features.append(("eligibility", "work_authorization"))
+    if re.search(
+        r"\b(?:salary|compensation|pay range|hourly rate|stipend|benefits|bonus|"
+        r"health insurance|paid leave|equity)\b",
+        text,
+    ):
+        features.append(("compensation", "compensation"))
+
+    role_keywords = ("engineer", "developer", "analyst", "designer", "support", "qa", "intern")
+    for role_keyword in role_keywords:
+        if re.search(r"\b" + re.escape(role_keyword) + r"\b", title):
+            features.append(("role_keyword", role_keyword))
+
     return list(set(features))
 
-def record_interaction(conn: sqlite3.Connection, session_id: str, job_id: str, event_type: str, job_data: Dict[str, Any]):
+
+def _reason_terms_in_job(job: Dict[str, Any], reason_details: str) -> List[str]:
+    """Keep only specific words from feedback that are present in the rejected posting."""
+    job_text = " ".join(
+        str(job.get(field) or "")
+        for field in ("title", "description", "location", "company")
+    ).lower()
+    terms = set()
+    for token in re.findall(r"[a-z0-9+#.-]{3,}", (reason_details or "").lower()):
+        token = token.strip(".-")
+        if (
+            len(token) >= 3
+            and token not in STOP_WORDS
+            and token not in GENERIC_REASON_WORDS
+            and re.search(r"(?<!\w)" + re.escape(token) + r"(?!\w)", job_text)
+        ):
+            terms.add(token)
+    return sorted(terms)
+
+
+def record_interaction(
+    conn: sqlite3.Connection,
+    session_id: str,
+    job_id: str,
+    event_type: str,
+    job_data: Dict[str, Any],
+    reason: str = "",
+    reason_details: str = "",
+):
     """Records an interaction event and incrementally trains agent weights."""
     init_learner_db(conn)
     weight_delta = EVENT_WEIGHTS.get(event_type, 1.0)
     now_iso = datetime.now(timezone.utc).isoformat()
+    reason = reason if reason in REJECTION_REASONS else ""
+    reason_details = (reason_details or "").strip()[:300]
 
     # Log raw event
     conn.execute("""
@@ -91,20 +179,39 @@ def record_interaction(conn: sqlite3.Connection, session_id: str, job_id: str, e
     """, (session_id, job_id, event_type, json.dumps({
         "title": job_data.get("title", ""),
         "company": job_data.get("company", ""),
-        "location": job_data.get("location", "")
+        "location": job_data.get("location", ""),
+        "reason": reason,
+        "reason_label": REJECTION_REASONS.get(reason, ""),
+        "reason_details": reason_details,
     }), now_iso))
 
     # Update learned weights for each extracted feature
     features = extract_features_from_job(job_data)
     is_positive = weight_delta > 0
+    targeted_types = (
+        REASON_FEATURE_TYPES.get(reason, set())
+        if event_type == "dismiss"
+        else set()
+    )
+    reason_terms = (
+        _reason_terms_in_job(job_data, reason_details)
+        if event_type == "dismiss"
+        else []
+    )
+    features.extend(("user_keyword", term) for term in reason_terms)
+    if reason_terms:
+        targeted_types.add("user_keyword")
 
     for f_type, f_val in features:
+        feature_delta = weight_delta
+        if f_type in targeted_types:
+            feature_delta -= 3.5
         row = conn.execute("SELECT score_delta, positive_hits, negative_hits FROM learned_weights WHERE feature_type=? AND feature_value=?",
                            (f_type, f_val)).fetchone()
         if row:
-            new_delta = round(row[0] + weight_delta, 2)
+            new_delta = round(row[0] + feature_delta, 2)
             pos = row[1] + (1 if is_positive else 0)
-            neg = row[2] + (0 if is_positive else 1)
+            neg = row[2] + (0 if is_positive else (2 if f_type in targeted_types else 1))
             conn.execute("""
             UPDATE learned_weights
             SET score_delta=?, positive_hits=?, negative_hits=?, updated_at=?
@@ -114,12 +221,27 @@ def record_interaction(conn: sqlite3.Connection, session_id: str, job_id: str, e
             conn.execute("""
             INSERT INTO learned_weights (feature_type, feature_value, score_delta, positive_hits, negative_hits, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
-            """, (f_type, f_val, round(weight_delta, 2), 1 if is_positive else 0, 0 if is_positive else 1, now_iso))
+            """, (
+                f_type, f_val, round(feature_delta, 2), 1 if is_positive else 0,
+                0 if is_positive else (2 if f_type in targeted_types else 1), now_iso,
+            ))
 
 def compute_learned_boost(conn: sqlite3.Connection, job: Dict[str, Any]) -> Tuple[int, List[str]]:
     """Calculates score boost and learning rationale based on historical interactions."""
     init_learner_db(conn)
     features = extract_features_from_job(job)
+    job_text = " ".join(
+        str(job.get(field) or "")
+        for field in ("title", "description", "location", "company")
+    ).lower()
+    learned_user_terms = conn.execute(
+        """SELECT feature_value FROM learned_weights
+           WHERE feature_type='user_keyword' AND score_delta <= -2.0"""
+    ).fetchall()
+    for row in learned_user_terms:
+        term = row[0]
+        if re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", job_text):
+            features.append(("user_keyword", term))
     if not features:
         return 0, []
 
@@ -193,4 +315,3 @@ def get_training_profile(conn: sqlite3.Connection) -> Dict[str, Any]:
         "top_locations": [dict(r) for r in top_locations],
         "disliked": [dict(r) for r in disliked]
     }
-

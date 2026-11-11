@@ -874,6 +874,41 @@ button:hover, .btn:hover {
   gap: 6px;
   align-items: center;
 }
+.reject-menu {
+  position: relative;
+}
+.reject-menu summary {
+  display: inline-flex;
+  align-items: center;
+  list-style: none;
+  cursor: pointer;
+}
+.reject-menu summary::-webkit-details-marker {
+  display: none;
+}
+.reject-menu form {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(300px, 82vw);
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+.reject-menu label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 650;
+}
+.reject-menu select,
+.reject-menu input {
+  width: 100%;
+  margin-top: 5px;
+}
 
 .panel {
   background: var(--surface);
