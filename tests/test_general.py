@@ -338,6 +338,7 @@ class TestGeneralJobApp(unittest.TestCase):
         self.assertIn("The Jury ranks", response.text)
         self.assertIn("Arbeitnow Job Board Scout", response.text)
         self.assertIn("Remotive Remote Scout", response.text)
+        self.assertIn("Official Careers ATS Scout", response.text)
         self.assertIn("Role &amp; Skills Advocate", response.text)
         self.assertIn("Experience &amp; Preferences Reviewer", response.text)
         self.assertIn("Posting Quality Reviewer", response.text)

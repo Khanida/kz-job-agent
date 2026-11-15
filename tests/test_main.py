@@ -2,6 +2,7 @@ import unittest
 import asyncio
 import io
 import json
+import os
 import sqlite3
 import zipfile
 import httpx
@@ -14,7 +15,14 @@ from app.agents.cv_analyzer import (
     assess_candidate_constraints,
     score_cv_match,
 )
-from app.agents.workers import ArbeitnowScout, BaseWorker, CuratedEmployerScout, RemotiveScout
+from app.agents.workers import (
+    ArbeitnowScout,
+    BaseWorker,
+    CuratedEmployerScout,
+    OfficialCareerSiteScout,
+    RemotiveScout,
+    google_careers_search_url,
+)
 from app.agents.orchestrator import run_discovery_workers, run_jury_deliberation_workflow
 from app.agents.sub_agents import SoftwareSystemsAgent, QualityOperationsAgent, RelocationVisaAgent
 from app.agents.jury import SupremeJuryAgent
@@ -39,6 +47,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("OPPORTUNITIES PIPELINE", response.text)
         self.assertNotIn("TODAY’S SELECTION, IN MOTION", response.text)
         self.assertIn("Refresh Today’s Top 5", response.text)
+        self.assertIn("Search official career pages with Google", response.text)
 
     def test_dashboard_explains_when_there_are_no_daily_picks(self):
         with get_db() as c:
@@ -766,6 +775,77 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertIn("url", first)
         self.assertEqual(first["liveness_status"], "unverified")
 
+    def test_official_career_scout_fetches_greenhouse_lever_and_ashby(self):
+        class FakeCareerBoardClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, params=None):
+                request = httpx.Request("GET", url)
+                if "boards-api.greenhouse.io" in url:
+                    payload = {"jobs": [{
+                        "title": "QA Engineer",
+                        "absolute_url": "https://boards.greenhouse.io/example/jobs/1",
+                        "location": {"name": "Jeddah"},
+                        "content": "<p>Test automation</p>",
+                    }]}
+                elif "api.lever.co" in url:
+                    payload = [{
+                        "text": "Software Engineer",
+                        "hostedUrl": "https://jobs.lever.co/example/2",
+                        "categories": {"location": "Remote"},
+                        "workplaceType": "Remote",
+                        "descriptionPlain": "Build software",
+                    }]
+                else:
+                    payload = {"jobs": [{
+                        "title": "Graduate Developer",
+                        "jobUrl": "https://jobs.ashbyhq.com/example/3",
+                        "location": "London",
+                        "descriptionPlain": "Build products",
+                    }]}
+                return httpx.Response(200, json=payload, request=request)
+
+        with patch.dict(os.environ, {
+            "GREENHOUSE_BOARDS": "Example GH=examplegh",
+            "LEVER_SITES": "Example Lever=examplelever",
+            "ASHBY_BOARDS": "Example Ashby=ExampleAshby",
+        }):
+            with patch(
+                "app.agents.workers.httpx.AsyncClient",
+                return_value=FakeCareerBoardClient(),
+            ):
+                jobs = asyncio.run(OfficialCareerSiteScout().fetch_jobs())
+
+        self.assertEqual([job["source"] for job in jobs], ["Greenhouse", "Lever", "Ashby"])
+        self.assertEqual([job["company"] for job in jobs], [
+            "Example GH", "Example Lever", "Example Ashby",
+        ])
+        self.assertEqual(jobs[0]["location"], "Jeddah")
+        self.assertIn("Test automation", jobs[0]["description"])
+        self.assertEqual(jobs[1]["location"], "Remote")
+        self.assertEqual(jobs[2]["location"], "London")
+        self.assertTrue(all(job["worker_scout"] == OfficialCareerSiteScout.name for job in jobs))
+
+    def test_google_careers_search_uses_profile_roles_and_location(self):
+        from urllib.parse import parse_qs, urlparse
+
+        search_url = google_careers_search_url({
+            "target_roles": "Junior QA Engineer, Graduate Software Engineer",
+            "skills": "Python",
+            "residence": "Jeddah, Saudi Arabia",
+        })
+        query = parse_qs(urlparse(search_url).query)["q"][0]
+        self.assertIn('"Junior QA Engineer"', query)
+        self.assertIn('"Graduate Software Engineer"', query)
+        self.assertIn("Jeddah, Saudi Arabia", query)
+        self.assertIn("site:boards.greenhouse.io", query)
+        self.assertIn("site:jobs.lever.co", query)
+        self.assertIn("site:jobs.ashbyhq.com", query)
+
     def test_api_scouts_raise_on_http_errors_instead_of_returning_empty_results(self):
         class ErrorResponseClient:
             async def __aenter__(self):
@@ -845,6 +925,13 @@ class TestMultiAgentJobSystem(unittest.TestCase):
                 "app.agents.orchestrator.RemotiveScout",
                 return_value=FakeScout("Remotive"),
             ),
+            patch(
+                "app.agents.orchestrator.OfficialCareerSiteScout",
+                return_value=FakeScout(
+                    "Official Careers",
+                    [{"url": "https://example.com/job"}],
+                ),
+            ),
             self.assertLogs("app.agents.orchestrator", level="INFO") as captured,
         ):
             jobs = asyncio.run(run_discovery_workers())
@@ -853,6 +940,7 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertTrue(any("Direct Employer failed to fetch" in line for line in captured.output))
         self.assertTrue(any("Arbeitnow returned 1 job listings" in line for line in captured.output))
         self.assertTrue(any("Remotive returned 0 job listings" in line for line in captured.output))
+        self.assertTrue(any("Official Careers returned 1 job listings" in line for line in captured.output))
 
     def test_listing_check_detects_404_and_closed_role(self):
         async def verify(url, status_code, body):

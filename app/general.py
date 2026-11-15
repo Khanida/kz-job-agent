@@ -23,7 +23,12 @@ from fastapi.staticfiles import StaticFiles
 from app.agents.cv_analyzer import analyze_cv
 from app.agents.learner import REJECTION_REASONS, init_learner_db, record_interaction
 from app.agents.orchestrator import verify_listing_availability
-from app.agents.workers import ArbeitnowScout, RemotiveScout
+from app.agents.workers import (
+    ArbeitnowScout,
+    RemotiveScout,
+    OfficialCareerSiteScout,
+    google_careers_search_url,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 AUTH_DB_PATH = Path(os.getenv("GENERAL_AUTH_DATABASE_PATH", str(APP_DIR.parent / "general_auth.db")))
@@ -388,7 +393,11 @@ class RemoteOpportunityScout:
 
 
 async def run_general_discovery_workers() -> list[dict]:
-    scouts = [PublicJobBoardScout(), RemoteOpportunityScout()]
+    scouts = [
+        PublicJobBoardScout(),
+        RemoteOpportunityScout(),
+        OfficialCareerSiteScout(),
+    ]
     results = await asyncio.gather(
         *(scout.fetch_jobs() for scout in scouts), return_exceptions=True
     )
@@ -879,6 +888,7 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
     user, csrf = user_context(request)
     with get_user_db(user["id"]) as conn:
         profile = conn.execute("SELECT * FROM profile WHERE id=1").fetchone()
+        profile_data = dict(profile)
         profile_ready = any(
             (profile[field] or "").strip()
             for field in ("target_roles", "skills", "cv_text")
@@ -948,10 +958,14 @@ def dashboard(request: Request, status: str = "all", q: str = "", msg: str = "")
             <span class='sr-only' data-refresh-status aria-live='polite'></span>
           </form>
           <a href='/profile' class='btn btn-secondary'>Update my profile</a>
+          <a href='{esc(google_careers_search_url(profile_data))}' class='btn btn-subtle' target='_blank' rel='noopener noreferrer'>Search official career pages with Google ↗</a>
         """
         refresh_note = f"Last refreshed: {esc(latest['session_date'] if latest else 'Not yet refreshed')}"
     else:
-        hero_actions = "<a href='/profile' class='btn btn-gold'>Set up my job preferences</a>"
+        hero_actions = f"""
+          <a href='/profile' class='btn btn-gold'>Set up my job preferences</a>
+          <a href='{esc(google_careers_search_url(profile_data))}' class='btn btn-secondary' target='_blank' rel='noopener noreferrer'>Search official career pages with Google ↗</a>
+        """
         refresh_note = "Add a target role, skill, or resume details to start your search."
 
     if show_results:
@@ -1046,7 +1060,11 @@ def jury_room(request: Request):
     }
     source_summary = "".join(
         f"<span class='pill'>{esc(name)}: {source_counts.get(name, 0)} listings</span>"
-        for name in (PublicJobBoardScout.name, RemoteOpportunityScout.name)
+        for name in (
+            PublicJobBoardScout.name,
+            RemoteOpportunityScout.name,
+            OfficialCareerSiteScout.name,
+        )
     )
     if not round_row:
         source_summary += "<p class='muted'>No worker results yet. Add a target role or skill to your profile, then refresh job matches.</p>"

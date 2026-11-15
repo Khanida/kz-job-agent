@@ -5,7 +5,14 @@ import sqlite3
 import logging
 import httpx
 
-from app.agents.workers import ArbeitnowScout, RemotiveScout, CuratedEmployerScout, BaseWorker, HEADERS
+from app.agents.workers import (
+    ArbeitnowScout,
+    RemotiveScout,
+    CuratedEmployerScout,
+    OfficialCareerSiteScout,
+    BaseWorker,
+    HEADERS,
+)
 from app.agents.jury import SupremeJuryAgent
 from app.agents.learner import compute_learned_boost, init_learner_db
 
@@ -16,7 +23,8 @@ async def run_discovery_workers() -> List[Dict[str, Any]]:
     scouts = [
         CuratedEmployerScout(),
         ArbeitnowScout(),
-        RemotiveScout()
+        RemotiveScout(),
+        OfficialCareerSiteScout(),
     ]
     # Gather jobs from each worker
     tasks = [scout.fetch_jobs() for scout in scouts]

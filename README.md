@@ -25,7 +25,9 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Jury Room UI** (`/jury`): Interactive court viewer showing live agent speeches, cross-examination challenges, and the Supreme Jury's verdicts.
 - **Daily Selection Shelf**: Ranks up to five eligible live roles on the main dashboard. The Jury no longer requires a 50-point minimum; picks below that score are clearly labeled as lower-confidence best-available options. Unverified/expired listings, suspicious links, explicit work-authorization blockers, and stated candidate-fit exclusions remain out of the roster.
 - **Daily refresh**: The app reruns the worker, Sub-Agent, and Jury workflow at midnight UTC and catches up on startup if the service was offline. Use **Refresh Today’s Top 5** on the dashboard to run it manually.
-- **Job-source diagnostics**: Arbeitnow and Remotive scouts now report HTTP, network, and invalid-feed failures to the application logs instead of silently appearing to return no jobs. Successful source runs also log the number of listings returned, so a working feed with no results is distinguishable from a failed feed.
+- **Job-source diagnostics**: Arbeitnow, Remotive, and configured career-board scouts report HTTP, network, and invalid-feed failures to the application logs instead of silently appearing to return no jobs. Successful source runs also log the number of listings returned, so a working feed with no results is distinguishable from a failed feed.
+- **Official company career feeds**: Configure public Greenhouse, Lever, and Ashby boards to import published listings directly into the main and general app workflows. Existing Arbeitnow and Remotive sources continue to run, and results are deduplicated by posting URL.
+- **Google career-page discovery**: The dashboard builds a Google query from your target roles and preferred location, including supported ATS domains and company career pages. Google results open in your browser for you to review; they are not scraped or automatically imported.
 - **Posting availability debate**: Each refresh checks the job page, records whether it is reachable, closed, expired, or unverified, and adds that evidence to the Jury debate. Only reachable postings can enter the daily top five; expired and unverified links are not presented as confirmed openings.
 - **CV-based role matching**: Text extracted from PDF, DOCX, TXT, or Markdown CVs is analyzed locally for skills and likely target roles. The suggestions are editable in the profile and feed a dedicated CV-alignment score in every Jury decision and daily selection.
 - **Candidate fit safeguards**: Profile preferences can restrict recommendations to entry-level roles, exclude skills and job types the candidate does not want (such as Rust or backend/full-stack), and reject postings explicitly limited to another nationality. The preferred city is a ranking preference, not a location filter; qualified jobs in other cities and remote roles remain eligible.
@@ -39,6 +41,20 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Candidate Profile Matrix** (`/profile`): Custom matching criteria, skills, and CV summary.
 - **Render Ready**: Blueprint config with persistent disk support.
 
+## Configure official career-board feeds
+
+The official-career scout uses public job-board endpoints and does not need an API key. You must provide each employer's public board identifier as an environment variable in your deployment (for example, Render's Environment settings) or local environment:
+
+```text
+GREENHOUSE_BOARDS="Company Name=greenhouse-board-token,Another Company=another-token"
+LEVER_SITES="Company Name=lever-site-name"
+ASHBY_BOARDS="Company Name=ashby-job-board-name"
+```
+
+Use the identifier from the employer's hosted careers URL: the board token from `boards.greenhouse.io/<token>`, the site name from `jobs.lever.co/<site>`, or the board name from `jobs.ashbyhq.com/<board>`. Each setting accepts comma-separated `Company=board-id` entries. Add only boards you want to search. Failed boards are logged independently, and other feeds continue working.
+
+The Google button is a search shortcut, not a Google Jobs API. Google documents `JobPosting` structured data for employers publishing their own vacancies, while its Custom Search JSON API is closed to new customers. Google results must be reviewed manually, and the app does not fetch result pages.
+
 ## Important limitations
 This is a starter, not a finished autonomous applicant. The current scanner is a discovery prototype. Public feeds are incomplete, keyword matching is not semantic, and visa/housing evidence is not verified. Neither app submits applications, answers legal questions, or sends personal data to employers. Application drafts in `app.main` are generated locally from the information already saved in the profile and should be reviewed before use. The original `app.main` app does not create accounts.
 CV skills and role suggestions use local keyword heuristics, not an external AI service; review the suggested roles before relying on them.
@@ -46,7 +62,7 @@ CV skills and role suggestions use local keyword heuristics, not an external AI 
 The limitations below apply to the original `app.main` entry point unless noted otherwise. `app.general` adds local account login and per-user data files, but it does not include email verification, password recovery, account administration, or managed database services. Before inviting real users or deploying publicly:
 1. Add authentication and per-user authorization.
 2. Replace SQLite with managed PostgreSQL (Supabase or Render Postgres).
-3. Add employer ATS integrations (Greenhouse/Lever) and source-specific terms/rate limits.
+3. Expand the configured official career-board list and add other permitted job feeds with source-specific terms and rate limits.
 4. Add an evidence-backed verification pipeline with source URLs and timestamps.
 5. Add encrypted CV storage and secrets management.
 6. Move scheduled work to a dedicated worker if the web service is scaled to multiple instances.

@@ -23,6 +23,7 @@ from app.agents.learner import (
     init_learner_db,
 )
 from app.agents.cv_analyzer import analyze_cv, get_cv_analysis, score_cv_match
+from app.agents.workers import google_careers_search_url
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(APP_DIR.parent / "jobs.db"))
@@ -898,6 +899,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
           <button type='submit' class='btn btn-secondary' data-refresh-button>↻ Refresh Today’s Top 5</button>
         </form>
         <a href='/jury' class='btn btn-subtle'>Open Jury Room →</a>
+        <a href='{esc(google_careers_search_url(dict(p)))}' class='btn btn-subtle' target='_blank' rel='noopener noreferrer'>Search official career pages with Google ↗</a>
       </div>
       <p class='refresh-note'>Last selection: {esc(last_refresh)} UTC · Automatic refresh daily at midnight UTC</p>
     </section>
