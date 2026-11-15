@@ -10,7 +10,7 @@ import logging
 import io
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
 from app.agents.orchestrator import run_jury_deliberation_workflow, run_discovery_workers
@@ -60,7 +60,7 @@ def init_db():
           is_daily_pick INTEGER DEFAULT 0, advocate_agent TEXT, jury_verdict TEXT,
           liveness_status TEXT DEFAULT 'unverified', liveness_checked_at TEXT,
           authenticity_status TEXT DEFAULT 'unverified', authenticity_evidence TEXT,
-          posted_date TEXT DEFAULT 'Recently posted',
+          posted_date TEXT DEFAULT 'Recently posted', application_deadline TEXT,
           status TEXT DEFAULT 'new', created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS profile (
@@ -94,6 +94,10 @@ def init_db():
         """)
 
         # Schema migrations for existing databases
+        job_columns = {row["name"] for row in c.execute("PRAGMA table_info(jobs)")}
+        if "application_deadline" not in job_columns:
+            c.execute("ALTER TABLE jobs ADD COLUMN application_deadline TEXT")
+
         for col, col_def in [
             ("jury_score", "INTEGER DEFAULT 0"),
             ("is_daily_pick", "INTEGER DEFAULT 0"),
@@ -835,9 +839,37 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
         status_pill = ""
         action_buttons = ""
         job_card_class = "job"
+        application_deadline = j["application_deadline"] or ""
+        deadline_overdue = False
+        deadline_display = ""
+        if application_deadline:
+            try:
+                parsed_deadline = date.fromisoformat(application_deadline)
+                deadline_overdue = (
+                    j_status == "shortlisted"
+                    and parsed_deadline <= datetime.now(timezone.utc).date()
+                )
+                deadline_display = parsed_deadline.strftime("%b %d, %Y")
+            except ValueError:
+                deadline_display = "Invalid date"
+        if deadline_overdue:
+            job_card_class += " is-overdue"
+        deadline_html = ""
 
         if j_status == "shortlisted":
             job_card_class += " is-shortlisted"
+            deadline_html = f"""
+            <div class='application-deadline{" overdue" if deadline_overdue else ""}'>
+              {f"<strong>Deadline passed — not applied</strong><br>" if deadline_overdue else ""}
+              {f"<span>Application deadline: {esc(deadline_display)}</span>" if application_deadline else "<span>No application deadline set</span>"}
+            </div>
+            <form method='post' action='/job/{j_id}/deadline' class='deadline-form'>
+              <label>Application deadline
+                <input type='date' name='application_deadline' value='{esc(application_deadline)}'>
+              </label>
+              <button type='submit' class='btn-sm btn-secondary'>Save deadline</button>
+            </form>
+            """
             status_pill = "<span class='pill pill-amber'>★ Shortlisted</span>"
             action_buttons = f"""
               <a class='btn btn-secondary btn-sm' href='/job/{j_id}/application'>Resume &amp; cover letter</a>
@@ -902,6 +934,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               <div><b>Visa:</b> <span class='{visa_class}'>{visa_txt}</span></div>
               <div><b>Relocation &amp; accommodation:</b> <span class='{housing_class}'>{housing_txt}</span></div>
             </div>
+            {deadline_html}
             {f"<div style='margin-bottom:12px; font-size:12px;'><b>Advocate:</b> {advocate_badge}</div>" if advocate_badge else ""}
           </div>
           <div class='job-footer'>
@@ -1723,6 +1756,44 @@ def update_job_status(
         f"/?status={status}&msg=" + quote_plus(message),
         status_code=303,
     )
+
+
+@app.post("/job/{job_id}/deadline")
+def update_job_deadline(
+    job_id: str,
+    application_deadline: str = Form(""),
+):
+    deadline = application_deadline.strip()
+    if deadline:
+        try:
+            parsed_deadline = date.fromisoformat(deadline)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Enter a valid application deadline.") from exc
+        if parsed_deadline.isoformat() != deadline:
+            raise HTTPException(status_code=422, detail="Enter a valid application deadline.")
+    else:
+        deadline = None
+
+    with get_db() as c:
+        job = c.execute(
+            "SELECT status FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if job["status"] != "shortlisted":
+            raise HTTPException(status_code=409, detail="Deadlines can only be set for shortlisted jobs.")
+        c.execute(
+            "UPDATE jobs SET application_deadline=? WHERE id=?",
+            (deadline, job_id),
+        )
+
+    message = "Application deadline saved." if deadline else "Application deadline cleared."
+    return RedirectResponse(
+        "/?status=shortlisted&msg=" + quote_plus(message),
+        status_code=303,
+    )
+
 
 @app.get("/track/click/{job_id}")
 def track_job_click(job_id: str, request: Request):

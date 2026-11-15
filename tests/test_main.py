@@ -80,6 +80,72 @@ class TestMultiAgentJobSystem(unittest.TestCase):
             with get_db() as c:
                 c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
+    def test_shortlisted_job_deadline_can_be_saved_and_marks_job_overdue(self):
+        job_id = "shortlist-deadline-test"
+        with get_db() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO jobs
+                   (id, title, company, location, url, source, score, jury_score,
+                    status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, "Deadline QA Engineer", "Example Co", "Remote",
+                 "https://example.com/deadline-role", "Test", 80, 85,
+                 "shortlisted", "2026-11-15"),
+            )
+
+        try:
+            response = self.client.post(
+                f"/job/{job_id}/deadline",
+                data={"application_deadline": "2000-01-01"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            self.assertIn("/?status=shortlisted", response.headers["location"])
+
+            with get_db() as c:
+                saved = c.execute(
+                    "SELECT application_deadline FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+            self.assertEqual(saved["application_deadline"], "2000-01-01")
+
+            overdue = self.client.get("/?status=shortlisted")
+            self.assertIn("is-overdue", overdue.text)
+            self.assertIn("Deadline passed — not applied", overdue.text)
+            self.assertIn("value='2000-01-01'", overdue.text)
+
+            self.client.post(
+                f"/job/{job_id}/status",
+                data={"status": "applied"},
+                follow_redirects=False,
+            )
+            applied = self.client.get("/")
+            self.assertNotIn("Deadline passed — not applied", applied.text)
+            self.assertNotIn("is-overdue", applied.text)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
+    def test_deadline_rejects_invalid_dates(self):
+        job_id = "invalid-shortlist-deadline-test"
+        with get_db() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO jobs
+                   (id, title, company, status, created_at)
+                   VALUES (?, ?, ?, 'shortlisted', ?)""",
+                (job_id, "Deadline Test", "Example Co", "2026-11-15"),
+            )
+
+        try:
+            response = self.client.post(
+                f"/job/{job_id}/deadline",
+                data={"application_deadline": "not-a-date"},
+            )
+            self.assertEqual(response.status_code, 422)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
     def test_dashboard_explains_when_there_are_no_daily_picks(self):
         with get_db() as c:
             previous_picks = [

@@ -775,6 +775,43 @@ button:hover, .btn:hover {
   border-color: var(--blue-border);
   background: linear-gradient(180deg, #edf5ff 0%, #ffffff 100%);
 }
+.job.is-overdue,
+.job.is-overdue:hover {
+  border: 2px solid #c62828;
+  background: linear-gradient(180deg, #fff0f0 0%, #ffffff 100%);
+  box-shadow: 0 5px 18px rgba(198, 40, 40, 0.14);
+}
+.application-deadline {
+  margin: 12px 0 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.application-deadline.overdue {
+  color: #b71c1c;
+  font-weight: 700;
+}
+.deadline-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+}
+.deadline-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+.deadline-form input {
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: var(--text);
+  font: inherit;
+}
 
 .job-header {
   display: flex;
