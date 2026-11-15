@@ -24,6 +24,7 @@ from app.agents.learner import (
 )
 from app.agents.cv_analyzer import analyze_cv, get_cv_analysis, score_cv_match
 from app.agents.workers import google_careers_search_url
+from app.emailer import send_daily_picks_email, utc_timestamp
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = os.getenv("DATABASE_PATH", str(APP_DIR.parent / "jobs.db"))
@@ -87,6 +88,9 @@ def init_db():
           verdict TEXT, consensus_score INTEGER, strengths TEXT, risks TEXT,
           recommendation TEXT, is_selected INTEGER DEFAULT 0, created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS daily_email_deliveries (
+          session_date TEXT PRIMARY KEY, sent_at TEXT NOT NULL
+        );
         """)
 
         # Schema migrations for existing databases
@@ -149,6 +153,7 @@ async def refresh_daily_selection_if_due(force: bool = False):
     async with daily_refresh_lock:
         with get_db() as c:
             today = datetime.now(timezone.utc).date().isoformat()
+            result = None
             latest = c.execute(
                 "SELECT session_date, top_picks_count FROM deliberations ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
@@ -160,10 +165,38 @@ async def refresh_daily_selection_if_due(force: bool = False):
                     (today,),
                 ).fetchone()[0]
                 if unchecked_jobs == 0:
-                    return {"skipped": True, "crowned_count": latest["top_picks_count"] or 0}
+                    result = {"skipped": True, "crowned_count": latest["top_picks_count"] or 0}
 
-            p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
-            return await run_jury_deliberation_workflow(c, dict(p))
+            if result is None:
+                p = c.execute("SELECT * FROM profile WHERE id=1").fetchone()
+                result = await run_jury_deliberation_workflow(c, dict(p))
+        await send_daily_picks_email_if_needed(today)
+        return result
+
+
+async def send_daily_picks_email_if_needed(session_date: str):
+    with get_db() as c:
+        already_sent = c.execute(
+            "SELECT 1 FROM daily_email_deliveries WHERE session_date=?",
+            (session_date,),
+        ).fetchone()
+        if already_sent:
+            return
+        picks = [
+            dict(row) for row in c.execute(
+                """SELECT title, company, location, url, jury_score, score
+                   FROM jobs WHERE is_daily_pick=1 AND status!='dismissed'
+                   ORDER BY jury_score DESC, score DESC, created_at DESC LIMIT 5"""
+            ).fetchall()
+        ]
+
+    sent = await asyncio.to_thread(send_daily_picks_email, picks, session_date)
+    if sent:
+        with get_db() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO daily_email_deliveries (session_date, sent_at) VALUES (?, ?)",
+                (session_date, utc_timestamp()),
+            )
 
 
 async def daily_refresh_scheduler():

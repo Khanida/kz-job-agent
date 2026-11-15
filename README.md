@@ -25,6 +25,7 @@ An intelligent, hierarchical multi-agent job discovery system that scouts live v
 - **Jury Room UI** (`/jury`): Interactive court viewer showing live agent speeches, cross-examination challenges, and the Supreme Jury's verdicts.
 - **Daily Selection Shelf**: Ranks up to five eligible live roles on the main dashboard. The Jury no longer requires a 50-point minimum; picks below that score are clearly labeled as lower-confidence best-available options. Unverified/expired listings, suspicious links, explicit work-authorization blockers, and stated candidate-fit exclusions remain out of the roster.
 - **Daily refresh**: The app reruns the worker, Sub-Agent, and Jury workflow at midnight UTC and catches up on startup if the service was offline. Use **Refresh Today’s Top 5** on the dashboard to run it manually.
+- **Daily email**: When SMTP is configured, the original `app.main` app emails the daily selection (or a no-picks update) once per UTC day. Delivery failures are logged and do not interrupt job refreshes.
 - **Job-source diagnostics**: Arbeitnow, Remotive, and configured career-board scouts report HTTP, network, and invalid-feed failures to the application logs instead of silently appearing to return no jobs. Successful source runs also log the number of listings returned, so a working feed with no results is distinguishable from a failed feed.
 - **Official company career feeds**: Configure public Greenhouse, Lever, and Ashby boards to import published listings directly into the main and general app workflows. Existing Arbeitnow and Remotive sources continue to run, and results are deduplicated by posting URL.
 - **Google career-page discovery**: The dashboard builds a Google query from your target roles and preferred location, including supported ATS domains and company career pages. Google results open in your browser for you to review; they are not scraped or automatically imported.
@@ -100,3 +101,9 @@ Push this repository to GitHub, then create a Render Blueprint from `render.yaml
 
 ## Environment
 - `DATABASE_PATH`: SQLite path; defaults to `jobs.db` in project root.
+- `DAILY_PICKS_EMAIL`: recipient for daily job-pick messages. Configure as a private environment variable; do not commit personal addresses.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL`: SMTP server, port (defaults to `587`), and sender address.
+- `SMTP_USERNAME`, `SMTP_PASSWORD`: optional SMTP authentication; set both or neither.
+- `SMTP_USE_SSL`: set to `true` for implicit TLS (commonly port `465`). Otherwise the app uses STARTTLS (commonly port `587`).
+
+For the original Render deployment (`render.yaml`), configure these values in the service's Environment settings. The daily email feature is for `app.main`; the separate account-based `app.general` deployment does not send daily emails.
