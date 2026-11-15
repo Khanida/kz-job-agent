@@ -477,7 +477,15 @@ button:hover, .btn:hover {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
+  gap: 16px;
   margin-bottom: 16px;
+}
+.daily-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
 }
 .daily-grid {
   display: grid;
@@ -1078,6 +1086,13 @@ footer {
   }
   .sectionhead > a {
     align-self: flex-start;
+  }
+  .daily-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .daily-header-actions {
+    justify-content: flex-start;
   }
   .auth-hero {
     padding: 22px 20px;

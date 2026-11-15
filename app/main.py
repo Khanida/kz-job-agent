@@ -777,7 +777,12 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               <p class='eyebrow' style='color:#790a3d;'>SUPREME JURY DECREE</p>
               <h2 style='margin:4px 0 0;'>The Jury's Daily Selection</h2>
             </div>
-            <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
+            <div class='daily-header-actions'>
+              <a href='/?status=shortlisted{f"&q={esc(q)}" if q else ""}'
+                 class='btn btn-sm {'btn-gold' if status == 'shortlisted' else 'btn-secondary'}'
+                 {'aria-current="page"' if status == 'shortlisted' else ''}>★ Shortlisted ({shortlisted_count})</a>
+              <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
+            </div>
           </div>
           <div class='daily-grid'>
             {"".join(pick_cards)}
@@ -792,7 +797,12 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
               <p class='eyebrow' style='color:#790a3d;'>SUPREME JURY DECREE</p>
               <h2 style='margin:4px 0 0;'>The Jury's Daily Selection</h2>
             </div>
-            <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
+            <div class='daily-header-actions'>
+              <a href='/?status=shortlisted{f"&q={esc(q)}" if q else ""}'
+                 class='btn btn-sm {'btn-gold' if status == 'shortlisted' else 'btn-secondary'}'
+                 {'aria-current="page"' if status == 'shortlisted' else ''}>★ Shortlisted ({shortlisted_count})</a>
+              <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
+            </div>
           </div>
           <div class='empty-state'>
             <h3>No jobs currently meet your Jury preferences</h3>
@@ -963,7 +973,6 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
     <div class='filter-bar'>
       <div class='tabs'>
         <a href='/?status=all{f"&q={esc(q)}" if q else ""}' class='tab {"active" if status=="all" else ""}'>Active ({total_raw - dismissed_count})</a>
-        <a href='/?status=shortlisted{f"&q={esc(q)}" if q else ""}' class='tab {"active" if status=="shortlisted" else ""}'>Shortlisted ({shortlisted_count})</a>
         <a href='/?status=applied{f"&q={esc(q)}" if q else ""}' class='tab {"active" if status=="applied" else ""}'>Applied ({applied_count})</a>
         <a href='/?status=new{f"&q={esc(q)}" if q else ""}' class='tab {"active" if status=="new" else ""}'>New ({new_count})</a>
         {f"<a href='/?status=dismissed' class='tab {'active' if status=='dismissed' else ''}'>Dismissed ({dismissed_count})</a>" if dismissed_count > 0 else ""}

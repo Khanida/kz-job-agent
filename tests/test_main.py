@@ -48,6 +48,12 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         self.assertNotIn("TODAY’S SELECTION, IN MOTION", response.text)
         self.assertIn("Refresh Today’s Top 5", response.text)
         self.assertIn("Search official career pages with Google", response.text)
+        shortlist_button = response.text.index("★ Shortlisted (")
+        daily_section = response.text.index("The Jury's Daily Selection")
+        training_section = response.text.index("Model Training:")
+        self.assertLess(daily_section, shortlist_button)
+        self.assertLess(shortlist_button, training_section)
+        self.assertIn("aria-current=\"page\">★ Shortlisted", self.client.get("/?status=shortlisted").text)
 
     def test_dashboard_explains_when_there_are_no_daily_picks(self):
         with get_db() as c:
