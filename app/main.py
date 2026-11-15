@@ -924,9 +924,40 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
       </div>
     """
 
+    if status == "shortlisted":
+        daily_shelf_html = f"""
+        <section class='daily-section'>
+          <div class='daily-header'>
+            <div>
+              <p class='eyebrow' style='color:#790a3d;'>YOUR SAVED ROLES</p>
+              <h2 style='margin:4px 0 0;'>Shortlisted Jobs ({shortlisted_count})</h2>
+            </div>
+            <div class='daily-header-actions'>
+              <a href='/?status=all{f"&q={esc(q)}" if q else ""}'
+                 class='btn btn-sm btn-secondary'>Back to Daily Picks</a>
+              <a href='/jury' style='font-size:13px; font-weight:700; color:#790a3d;'>Open Jury Deliberation Room →</a>
+            </div>
+          </div>
+          <div class='jobs'>{cards_html}</div>
+        </section>
+        """
+
     flash_banner = f"<div class='notice notice-info'>{esc(msg)}</div>" if msg else ""
 
     last_refresh = latest_deliberation["session_date"] if latest_deliberation else "Not yet run"
+    pipeline_html = "" if status == "shortlisted" else f"""
+    <div class='sectionhead'>
+      <div>
+        <p class='eyebrow'>OPPORTUNITIES PIPELINE</p>
+        <h2>{f"Showing {status.capitalize()} Vacancies" if status != 'all' else "Candidate Vacancies Pool"} ({len(jobs)})</h2>
+      </div>
+      <a href='/profile' style='font-size:13px;'>Refine candidate matching criteria →</a>
+    </div>
+
+    <div class='jobs'>
+      {cards_html}
+    </div>
+    """
 
     return layout(f"""
     {flash_banner}
@@ -985,17 +1016,7 @@ def home(request: Request, status: str = "all", q: str = "", msg: str = ""):
       </form>
     </div>
 
-    <div class='sectionhead'>
-      <div>
-        <p class='eyebrow'>OPPORTUNITIES PIPELINE</p>
-        <h2>{f"Showing {status.capitalize()} Vacancies" if status != 'all' else "Candidate Vacancies Pool"} ({len(jobs)})</h2>
-      </div>
-      <a href='/profile' style='font-size:13px;'>Refine candidate matching criteria →</a>
-    </div>
-
-    <div class='jobs'>
-      {cards_html}
-    </div>
+    {pipeline_html}
     """, active_nav="dashboard")
 
 @app.get("/jury", response_class=HTMLResponse)

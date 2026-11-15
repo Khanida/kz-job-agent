@@ -53,7 +53,32 @@ class TestMultiAgentJobSystem(unittest.TestCase):
         training_section = response.text.index("Model Training:")
         self.assertLess(daily_section, shortlist_button)
         self.assertLess(shortlist_button, training_section)
-        self.assertIn("aria-current=\"page\">★ Shortlisted", self.client.get("/?status=shortlisted").text)
+
+    def test_shortlist_filter_replaces_daily_picks_section(self):
+        job_id = "shortlist-section-test"
+        with get_db() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO jobs
+                   (id, title, company, location, url, source, score, jury_score,
+                    status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, "Saved QA Engineer", "Example Co", "Remote",
+                 "https://example.com/saved-role", "Test", 80, 85,
+                 "shortlisted", "2026-11-15"),
+            )
+
+        try:
+            response = self.client.get("/?status=shortlisted")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Shortlisted Jobs (", response.text)
+            self.assertIn("Saved QA Engineer", response.text)
+            self.assertIn("Back to Daily Picks", response.text)
+            self.assertNotIn("The Jury's Daily Selection", response.text)
+            self.assertNotIn("OPPORTUNITIES PIPELINE", response.text)
+        finally:
+            with get_db() as c:
+                c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
     def test_dashboard_explains_when_there_are_no_daily_picks(self):
         with get_db() as c:
